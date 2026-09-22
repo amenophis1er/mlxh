@@ -5,7 +5,7 @@ via `port`/`host`). Authentication: none — any bearer token / API key is
 accepted. The server binds to localhost by default and must not be exposed
 beyond it as-is.
 
-Two client dialects are served side by side:
+Three client dialects are served side by side:
 
 | Dialect | Endpoints | Typical clients |
 |---|---|---|
