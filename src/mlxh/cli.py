@@ -151,10 +151,11 @@ def cmd_search(args):
         n = st.total
         return f"{n / 1e9:.1f}B" if n >= 1e9 else f"{n / 1e6:.0f}M"
 
-    print(ui.dim(f"{'REPO':56} {'PARAMS':>7} {'SIZE':>8} {'DOWNLOADS':>10}  UPDATED"))
+    rw = max(len("REPO"), max(len(m.id) for m in results))
+    print(ui.dim(f"{'REPO':{rw}} {'PARAMS':>7} {'SIZE':>8} {'DOWNLOADS':>10}  UPDATED"))
     for m, size in zip(results, sizes):
         updated = m.last_modified.strftime("%Y-%m-%d") if m.last_modified else "-"
-        print(f"{m.id:56} {params_of(m):>7} {size:>8} {m.downloads or 0:>10,}  {updated}")
+        print(f"{m.id:{rw}} {params_of(m):>7} {size:>8} {m.downloads or 0:>10,}  {updated}")
     print()
     ui.note("install one with: mlxh pull <repo-id>")
 
@@ -278,12 +279,18 @@ def cmd_list(_args):
         print(f"no models in {models_dir(cfg)}")
         ui.note("mlxh search <query> finds MLX models; mlxh pull <repo-id> installs one")
         return
+    rows = []
     for name, path in models.items():
-        kind = "linked" if path.is_symlink() else "pulled"
         n = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
-        line = f"{name:24} {kind:7} {n / 1e9:7.1f} GB  {source_of(path):48}"
-        if path.is_symlink():
-            line += f"  -> {path.resolve()}"
+        rows.append((name, "linked" if path.is_symlink() else "pulled",
+                     f"{n / 1e9:.1f} GB", source_of(path),
+                     str(path.resolve()) if path.is_symlink() else ""))
+    nw = max(len(r[0]) for r in rows)
+    sw = max(len(r[3]) for r in rows)
+    for name, kind, size, source, target in rows:
+        line = f"{name:{nw}}  {kind:6} {size:>8}  {source:{sw}}"
+        if target:
+            line += f"  -> {target}"
         print(line.rstrip())
 
 
