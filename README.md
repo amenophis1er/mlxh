@@ -51,6 +51,7 @@ mlxh chat bonsai2 -- -p "one question"   # one-shot (args after the name pass th
 mlxh serve bonsai2 --port 8081           # OpenAI-compatible API at /v1
 mlxh config port 8082                    # persistent defaults
 
+mlxh mv gemma-4-E4B-it-MLX-4bit gemma4   # rename to a nicer alias
 mlxh rm bonsai2                          # delete pulled weights (links: symlink only)
 mlxh uninstall                           # remove ~/.mlxh + launcher, after confirmation
 ```

@@ -5,6 +5,7 @@ Commands:
   mlxh pull <hf-repo> [--name NAME]   download a model from Hugging Face
   mlxh link <path> [--name NAME]      symlink an existing local model dir in
   mlxh list                           show available models
+  mlxh mv <name> <new-name>           rename a model
   mlxh rm <name>                      remove a model (links: symlink only)
   mlxh serve <name> [--port N ...]    OpenAI-compatible API server
   mlxh chat <name> [chat args...]     terminal chat (tools, images, streaming)
@@ -286,6 +287,21 @@ def cmd_list(_args):
         print(line.rstrip())
 
 
+def cmd_mv(args):
+    cfg = load_config()
+    root = models_dir(cfg)
+    old, new = root / args.name, root / args.new_name
+    if not is_model(old):
+        ui.fail(f"no model named '{args.name}'", f"models dir: {root}")
+    if "/" in args.new_name or not args.new_name.strip():
+        ui.fail(f"invalid name '{args.new_name}'")
+    if new.exists() or new.is_symlink():
+        ui.fail(f"'{args.new_name}' already exists", f"at {new}")
+    old.rename(new)
+    ui.ok(f"renamed '{args.name}' -> '{args.new_name}'")
+    ui.note(f"chat: mlxh chat {args.new_name}    serve: mlxh serve {args.new_name}")
+
+
 def cmd_rm(args):
     cfg = load_config()
     path = models_dir(cfg) / args.name
@@ -399,6 +415,11 @@ def main():
 
     p = sub.add_parser("list", help="show available models")
     p.set_defaults(fn=cmd_list)
+
+    p = sub.add_parser("mv", help="rename a model")
+    p.add_argument("name")
+    p.add_argument("new_name")
+    p.set_defaults(fn=cmd_mv)
 
     p = sub.add_parser("rm", help="remove a model (links: symlink only)")
     p.add_argument("name")
