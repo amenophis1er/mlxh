@@ -22,7 +22,16 @@ Alpha: developed and tested on one machine
   queue, controls: `max_queued`, `max_tokens_cap`, `memory_limit_gb`,
   `cache_limit_gb`, `gen_timeout_s`.
 - **Guardrails**: `pull` refuses models that don't fit free disk or
-  unified memory (`--force` to override the memory check).
+  unified memory (`--force` to override the memory check). The server
+  auto-caps MLX memory at 80% of RAM and rejects prompts over
+  `max_prompt_tokens` (default 8192) — a failed request instead of a
+  frozen machine when a huge context balloons the KV cache.
+- **Anthropic API + launch**: `serve` also speaks the Anthropic Messages
+  API (`/v1/messages`, streaming and non-streaming, tool use, images,
+  count_tokens), so Claude Code works against local models.
+  `mlxh launch claude|codex [--model NAME]` starts a server if needed,
+  wires the agent's environment, and runs it (`--dry-run` prints the
+  wiring).
 - **Loaders**: stock MLX models via mlx-vlm/mlx-lm, Prism Hadamard packs
   via their bundled runtime, behind one Runner interface.
 - **Install**: `curl | bash` (self-bootstrapping installer),

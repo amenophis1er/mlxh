@@ -7,7 +7,8 @@ Commands:
   mlxh list                           show available models
   mlxh mv <name> <new-name>           rename a model
   mlxh rm <name>                      remove a model (links: symlink only)
-  mlxh serve <name> [--port N ...]    OpenAI-compatible API server
+  mlxh serve <name> [--port N ...]    OpenAI + Anthropic compatible API server
+  mlxh launch <agent> [--model NAME]  run a coding agent (claude, codex) on a model
   mlxh chat <name> [chat args...]     terminal chat (tools, images, streaming)
   mlxh config [key [value]]           show or set config
   mlxh uninstall                      remove mlxh and everything it manages
@@ -22,9 +23,10 @@ Config keys (mlxh config <key> <value>):
   models_dir          where models live (default $MLXH_HOME/models)
   max_queued          pending generations beyond the active one before 503 (4)
   max_tokens_cap      server-side ceiling on max_tokens, 0 = unlimited (16384)
-  memory_limit_gb     MLX GPU/unified-memory limit, 0 = off
+  memory_limit_gb     MLX memory limit, 0 = auto (80% RAM), -1 = off
   cache_limit_gb      MLX buffer-cache limit, 0 = off
   gen_timeout_s       hard stop for one generation, 0 = off (600)
+  max_prompt_tokens   reject prompts bigger than this, 0 = off (8192)
   chat_tools          load ~/.mlxh/tools.py in chat by default (false)
 
 State lives under $MLXH_HOME (default ~/.mlxh): venv, app code, config,
@@ -51,6 +53,7 @@ DEFAULTS = {
     "memory_limit_gb": 0.0,
     "cache_limit_gb": 0.0,
     "gen_timeout_s": 600,
+    "max_prompt_tokens": 8192,
     "chat_tools": False,
 }
 def _bool(v):
@@ -64,7 +67,7 @@ def _bool(v):
 KEY_TYPES = {
     "port": int, "host": str, "models_dir": str, "max_queued": int,
     "max_tokens_cap": int, "memory_limit_gb": float, "cache_limit_gb": float,
-    "gen_timeout_s": int, "chat_tools": _bool,
+    "gen_timeout_s": int, "max_prompt_tokens": int, "chat_tools": _bool,
 }
 
 
@@ -364,31 +367,145 @@ def cmd_rm(args):
         ui.fail(f"no model named '{args.name}'", f"models dir: {models_dir(cfg)}")
 
 
+def serve_argv(cfg, name, path, overrides=None):
+    o = overrides or {}
+
+    def pick(key):
+        return o.get(key) if o.get(key) is not None else cfg[key]
+
+    return [
+        sys.executable, "-m", "mlxh.serve_app",
+        "--model-path", path, "--name", name,
+        "--port", str(pick("port")),
+        "--host", str(pick("host")),
+        "--max-queued", str(pick("max_queued")),
+        "--max-tokens-cap", str(pick("max_tokens_cap")),
+        "--memory-limit-gb", str(pick("memory_limit_gb")),
+        "--cache-limit-gb", str(pick("cache_limit_gb")),
+        "--gen-timeout-s", str(pick("gen_timeout_s")),
+        "--max-prompt-tokens", str(pick("max_prompt_tokens")),
+    ]
+
+
 def cmd_serve(args):
     cfg = load_config()
     name = args.name or pick_model(cfg, "serve")
     path = resolve(cfg, name)
-
-    def pick(cli_value, key):
-        return cli_value if cli_value is not None else cfg[key]
-
-    os.execv(sys.executable, [
-        sys.executable, "-m", "mlxh.serve_app",
-        "--model-path", path, "--name", name,
-        "--port", str(pick(args.port, "port")),
-        "--host", str(pick(args.host, "host")),
-        "--max-queued", str(pick(args.max_queued, "max_queued")),
-        "--max-tokens-cap", str(pick(args.max_tokens_cap, "max_tokens_cap")),
-        "--memory-limit-gb", str(pick(args.memory_limit_gb, "memory_limit_gb")),
-        "--cache-limit-gb", str(pick(args.cache_limit_gb, "cache_limit_gb")),
-        "--gen-timeout-s", str(pick(args.gen_timeout_s, "gen_timeout_s")),
-    ])
+    overrides = {k: getattr(args, k) for k in
+                 ("port", "host", "max_queued", "max_tokens_cap",
+                  "memory_limit_gb", "cache_limit_gb", "gen_timeout_s",
+                  "max_prompt_tokens")}
+    os.execv(sys.executable, serve_argv(cfg, name, path, overrides))
 
 
 def _chat_args(cfg, rest):
     if cfg["chat_tools"] and "--tools" not in rest and "--no-tools" not in rest:
         rest = ["--tools", *rest]
     return rest
+
+
+AGENTS = {
+    # agent -> (env for a server at PORT, extra argv given MODEL)
+    "claude": lambda port, model: (
+        {"ANTHROPIC_BASE_URL": f"http://127.0.0.1:{port}",
+         "ANTHROPIC_AUTH_TOKEN": "mlxh", "ANTHROPIC_API_KEY": ""},
+        ["--model", model]),
+    "codex": lambda port, model: (
+        {"OPENAI_BASE_URL": f"http://127.0.0.1:{port}/v1",
+         "OPENAI_API_KEY": "mlxh"},
+        ["--model", model]),
+}
+
+
+def cmd_launch(args):
+    import shutil as _shutil
+    import subprocess
+    import urllib.request
+
+    cfg = load_config()
+    if args.agent not in AGENTS:
+        ui.fail(f"unknown agent '{args.agent}'",
+                f"supported: {', '.join(AGENTS)}")
+
+    # argparse REMAINDER swallows our own flags when they follow the agent
+    # name; reclaim them. Everything after "--" belongs to the agent.
+    rest, cleaned, i = list(args.rest), [], 0
+    while i < len(rest):
+        a = rest[i]
+        if a == "--":
+            cleaned.extend(rest[i + 1:])
+            break
+        if a == "--model" and args.model is None and i + 1 < len(rest):
+            args.model = rest[i + 1]
+            i += 2
+            continue
+        if a == "--port" and args.port is None and i + 1 < len(rest):
+            args.port = int(rest[i + 1])
+            i += 2
+            continue
+        if a == "--dry-run":
+            args.dry_run = True
+            i += 1
+            continue
+        cleaned.append(a)
+        i += 1
+    args.rest = cleaned
+
+    name = args.model or pick_model(cfg, f"use with {args.agent}")
+    path = resolve(cfg, name)
+    port = args.port or cfg["port"]
+    env_extra, agent_args = AGENTS[args.agent](port, name)
+
+    def server_up():
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=1) as r:
+                return json.loads(r.read())["data"][0]["id"]
+        except Exception:
+            return None
+
+    if args.dry_run:
+        for k, v in env_extra.items():
+            print(f"export {k}={v!r}")
+        print(" ".join([args.agent, *agent_args, *args.rest]))
+        return
+
+    started = None
+    serving = server_up()
+    if serving is None:
+        ui.step(f"starting mlxh serve {name} on port {port}")
+        log = (HOME / "serve.log").open("a")
+        started = subprocess.Popen(serve_argv(cfg, name, path, {"port": port}),
+                                   stdout=log, stderr=log)
+        import time
+        deadline = time.time() + 180
+        while server_up() is None:
+            if started.poll() is not None or time.time() > deadline:
+                ui.fail("server failed to start", f"see {HOME / 'serve.log'}")
+            time.sleep(1)
+    elif serving != name:
+        ui.note(f"reusing running server on port {port} (serving '{serving}', not '{name}')")
+    else:
+        ui.note(f"reusing running server on port {port}")
+
+    if not _shutil.which(args.agent):
+        if started:
+            started.terminate()
+        ui.fail(f"'{args.agent}' is not installed",
+                hint="install it first, or use --dry-run to see the wiring")
+    cap = cfg["max_prompt_tokens"]
+    if cap and cap < 32768:
+        ui.note(f"note: coding agents send ~30k-token prompts; max_prompt_tokens={cap} "
+                f"will reject them. Raise with `mlxh config max_prompt_tokens 40960` — "
+                f"large contexts need real memory headroom (KV cache grows with tokens).")
+    ui.step(f"launching {args.agent} against {name}")
+    try:
+        proc = subprocess.run([args.agent, *agent_args, *args.rest],
+                              env={**os.environ, **env_extra})
+    finally:
+        if started:
+            started.terminate()
+            ui.note("stopped the mlxh server it started")
+    sys.exit(proc.returncode)
 
 
 def cmd_chat(args):
@@ -491,7 +608,16 @@ def main():
     p.add_argument("--memory-limit-gb", type=float, dest="memory_limit_gb")
     p.add_argument("--cache-limit-gb", type=float, dest="cache_limit_gb")
     p.add_argument("--gen-timeout-s", type=int, dest="gen_timeout_s")
+    p.add_argument("--max-prompt-tokens", type=int, dest="max_prompt_tokens")
     p.set_defaults(fn=cmd_serve)
+
+    p = sub.add_parser("launch", help="launch a coding agent (claude, codex) on a local model")
+    p.add_argument("agent", help="claude or codex")
+    p.add_argument("--model")
+    p.add_argument("--port", type=int)
+    p.add_argument("--dry-run", action="store_true", help="print env + command instead of running")
+    p.add_argument("rest", nargs=argparse.REMAINDER)
+    p.set_defaults(fn=cmd_launch)
 
     p = sub.add_parser("chat", help="terminal chat (extra args go to the chat CLI)")
     p.add_argument("name", nargs="?")

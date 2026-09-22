@@ -116,3 +116,12 @@ def test_list_output(mdir, capsys):
     assert "m1" in out
     assert "org/model@aaaaaaa" in out
     assert "pulled" in out
+
+
+def test_serve_argv_includes_all_knobs(mdir):
+    make_model(mdir, "m1")
+    cfg = cli.load_config()
+    argv = cli.serve_argv(cfg, "m1", "/p", {"port": 9999})
+    assert "--max-prompt-tokens" in argv and "--port" in argv
+    assert argv[argv.index("--port") + 1] == "9999"
+    assert argv[argv.index("--max-prompt-tokens") + 1] == str(cfg["max_prompt_tokens"])

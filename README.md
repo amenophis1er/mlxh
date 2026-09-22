@@ -76,9 +76,16 @@ Set persistently with `mlxh config <key> <value>`, or per run with
 |---|---|---|
 | `max_queued` | 4 | pending generations beyond the active one before 503 |
 | `max_tokens_cap` | 16384 | server-side ceiling on requested `max_tokens` (0 = off) |
-| `memory_limit_gb` | 0 (off) | MLX unified-memory limit for the server process |
+| `memory_limit_gb` | 0 = auto | MLX memory limit; auto caps at 80% of RAM, -1 disables |
 | `cache_limit_gb` | 0 (off) | MLX buffer-cache limit (frees memory between requests) |
 | `gen_timeout_s` | 600 | hard stop for a single generation (0 = off) |
+| `max_prompt_tokens` | 8192 | reject larger prompts with a 400 (0 = off) |
+
+The last two exist because long contexts are a real hazard on unified memory:
+KV cache grows with prompt length, and an unbounded 30k-token request can
+exhaust RAM and freeze the whole machine. The server fails a request rather
+than take the machine down; raise the limits deliberately when you have the
+headroom (coding agents need `max_prompt_tokens` around 40960).
 
 Generation is intentionally serial (one at a time): Apple Silicon has one GPU
 and the MLX stack has no continuous batching, so requests queue. For parallel
