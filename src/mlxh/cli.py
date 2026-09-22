@@ -1,6 +1,7 @@
 """mlxh — a small harness for running local MLX models with an OpenAI API.
 
 Commands:
+  mlxh run <repo-or-name>             chat now, pulling first if needed
   mlxh pull <hf-repo> [--name NAME]   download a model from Hugging Face
   mlxh link <path> [--name NAME]      symlink an existing local model dir in
   mlxh list                           show available models
@@ -168,9 +169,7 @@ def total_ram_bytes():
             return 0
 
 
-def cmd_pull(args):
-    cfg = load_config()
-    name = args.name or args.repo.split("/")[-1]
+def do_pull(cfg, repo, name, force=False):
     dest = models_dir(cfg) / name
     if dest.exists():
         ui.fail(f"'{name}' already exists",
@@ -183,41 +182,77 @@ def cmd_pull(args):
 
     try:
         size = sum(s.size or 0 for s in
-                   HfApi().model_info(args.repo, files_metadata=True).siblings)
+                   HfApi().model_info(repo, files_metadata=True).siblings)
     except Exception:
         size = 0  # can't size it (offline, gated, ...): proceed without guardrails
     if size:
         free = shutil.disk_usage(dest.parent).free
         if size + 2e9 > free:  # keep a 2 GB margin
-            ui.fail(f"{args.repo} does not fit on disk",
+            ui.fail(f"{repo} does not fit on disk",
                     f"download size  {size / 1e9:8.1f} GB",
                     f"free space     {free / 1e9:8.1f} GB  ({dest.parent})")
         ram = total_ram_bytes()
-        if ram and size > 0.9 * ram and not args.force:
-            ui.fail(f"{args.repo} won't load on this machine",
+        if ram and size > 0.9 * ram and not force:
+            ui.fail(f"{repo} won't load on this machine",
                     f"model weights  {size / 1e9:8.1f} GB",
                     f"unified memory {ram / 1e9:8.0f} GB",
                     hint="--force downloads anyway (e.g. for another machine)")
 
-    ui.step(f"downloading {args.repo}{f' ({size / 1e9:.1f} GB)' if size else ''}")
+    ui.step(f"downloading {repo}{f' ({size / 1e9:.1f} GB)' if size else ''}")
     try:
-        snapshot_download(args.repo, local_dir=str(dest))
+        snapshot_download(repo, local_dir=str(dest))
     except Exception as e:
         shutil.rmtree(dest, ignore_errors=True)
         ui.fail("download failed",
                 f"{type(e).__name__}: {e}",
                 hint="check the repo id with `mlxh search`; gated repos need `hf auth login`")
     try:
-        revision = HfApi().model_info(args.repo).sha or ""
+        revision = HfApi().model_info(repo).sha or ""
     except Exception:
         revision = ""
     (dest / ".mlxh.json").write_text(json.dumps({
-        "repo": args.repo,
+        "repo": repo,
         "revision": revision,
         "pulled_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }, indent=2))
-    ui.ok(f"pulled {args.repo}@{revision[:7]} as '{name}'")
+    ui.ok(f"pulled {repo}@{revision[:7]} as '{name}'")
+
+
+def cmd_pull(args):
+    cfg = load_config()
+    name = args.name or args.repo.split("/")[-1]
+    do_pull(cfg, args.repo, name, force=args.force)
     ui.note(f"chat: mlxh chat {name}    serve: mlxh serve {name}")
+
+
+def repo_installed_as(cfg, repo):
+    """Name of an installed model whose recorded source repo matches, if any."""
+    for name, path in discover(cfg).items():
+        meta = path / ".mlxh.json"
+        if meta.is_file():
+            try:
+                if json.loads(meta.read_text()).get("repo") == repo:
+                    return name
+            except json.JSONDecodeError:
+                pass
+    return None
+
+
+def cmd_run(args):
+    cfg = load_config()
+    name = args.target
+    if "/" in name:  # a Hugging Face repo id
+        installed = repo_installed_as(cfg, name)
+        if installed:
+            name = installed
+        else:
+            name = args.target.split("/")[-1]
+            if not is_model(models_dir(cfg) / name):
+                do_pull(cfg, args.target, name, force=args.force)
+    path = resolve(cfg, name)
+    os.execv(sys.executable, [
+        sys.executable, "-m", "mlxh.chat_cli", "--model-path", path, *args.rest,
+    ])
 
 
 def cmd_link(args):
@@ -342,6 +377,13 @@ def main():
     p.add_argument("query")
     p.add_argument("--limit", type=int, default=10)
     p.set_defaults(fn=cmd_search)
+
+    p = sub.add_parser("run", help="chat with a model, pulling it first if needed")
+    p.add_argument("target", help="installed model name or Hugging Face repo id")
+    p.add_argument("--force", action="store_true",
+                   help="download even if it exceeds this machine's memory")
+    p.add_argument("rest", nargs=argparse.REMAINDER)
+    p.set_defaults(fn=cmd_run)
 
     p = sub.add_parser("pull", help="download a model from Hugging Face")
     p.add_argument("repo")
