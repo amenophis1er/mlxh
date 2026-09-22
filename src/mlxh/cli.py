@@ -25,7 +25,7 @@ Config keys (mlxh config <key> <value>):
   memory_limit_gb     MLX GPU/unified-memory limit, 0 = off
   cache_limit_gb      MLX buffer-cache limit, 0 = off
   gen_timeout_s       hard stop for one generation, 0 = off (600)
-  chat_tools          enable built-in chat tools by default (false)
+  chat_tools          load ~/.mlxh/tools.py in chat by default (false)
 
 State lives under $MLXH_HOME (default ~/.mlxh): venv, app code, config,
 models, HF cache. Uninstall removes exactly that plus the launcher.

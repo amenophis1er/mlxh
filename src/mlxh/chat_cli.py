@@ -12,16 +12,14 @@ from pathlib import Path
 
 from . import ui
 from .loader import load_runner
-from .toolcalls import TOOL_REGISTRY, TOOL_SPECS, parse_tool_calls, run_tool
+from .toolcalls import load_user_tools, parse_tool_calls, run_tool
 
 MAX_TOOL_ROUNDS = 5
 
 
-def generate_once(runner, messages, images, max_tokens, tools):
+def generate_once(runner, messages, images, max_tokens, specs):
     """One generation pass; streams visible text, hides tool-call XML."""
-    prompt = runner.template(
-        messages, num_images=len(images), tools=TOOL_SPECS if tools else None
-    )
+    prompt = runner.template(messages, num_images=len(images), tools=specs)
     parts, printed = [], 0
     marker = "<tool_call>"
     last = None
@@ -45,10 +43,12 @@ def generate_once(runner, messages, images, max_tokens, tools):
     return full, last
 
 
-def ask(runner, messages, images, max_tokens, tools=True):
+def ask(runner, messages, images, max_tokens, tools=None):
+    """tools: (registry, specs) to enable the agent loop, or None."""
+    registry, specs = tools if tools else ({}, None)
     total_tokens, tps = 0, 0.0
     for _ in range(MAX_TOOL_ROUNDS):
-        text, last = generate_once(runner, messages, images, max_tokens, tools)
+        text, last = generate_once(runner, messages, images, max_tokens, specs)
         total_tokens += last.generation_tokens
         tps = last.generation_tps
         content, tool_calls = parse_tool_calls(text)
@@ -67,7 +67,7 @@ def ask(runner, messages, images, max_tokens, tools=True):
         for tc in tool_calls:
             name = tc["function"]["name"]
             args = json.loads(tc["function"]["arguments"])
-            result = run_tool(name, args)
+            result = run_tool(registry, name, args)
             print("\n" + ui.dim(f"[tool] {name}({json.dumps(args, ensure_ascii=False)}) -> "
                   f"{json.dumps(result, ensure_ascii=False)}", sys.stderr), file=sys.stderr)
             messages.append({"role": "tool", "content": json.dumps(result)})
@@ -94,12 +94,18 @@ def main():
         sys.exit(str(e))
     if args.image and not runner.supports_images:
         sys.exit("this model does not support images")
-    tools = args.tools and not args.no_tools
-    if tools:
-        print(f"Tools enabled: {', '.join(TOOL_REGISTRY)}", file=sys.stderr)
-    else:
-        print("Tools off (enable with --tools: "
-              f"{', '.join(TOOL_REGISTRY)}; get_weather calls open-meteo.com)", file=sys.stderr)
+    tools = None
+    if args.tools and not args.no_tools:
+        registry, specs, tools_path = load_user_tools()
+        if registry is None:
+            sys.exit(f"--tools: no tools file at {tools_path}\n"
+                     "create one from the example: cp examples/tools.py "
+                     f"{tools_path}\n"
+                     "https://github.com/amenophis1er/mlxh/blob/main/examples/tools.py")
+        if not registry:
+            sys.exit(f"{tools_path} defines no TOOL_REGISTRY")
+        print(f"Tools ({tools_path.name}): {', '.join(registry)}", file=sys.stderr)
+        tools = (registry, specs)
 
     if args.prompt:
         messages = [{"role": "user", "content": args.prompt}]

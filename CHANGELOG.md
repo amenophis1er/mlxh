@@ -9,11 +9,12 @@ Alpha: developed and tested on one machine
   (with provenance recorded as repo@revision), `link` (symlink existing
   dirs in), `list`, `mv`, `rm`, one models dir where the filesystem is
   the registry (`models_dir` config, `$MLXH_MODELS_DIR` override).
-- **Chat**: interactive REPL with streaming, image input (`/image`),
-  history (`/reset`), built-in tools (opt-in via `--tools` or the
-  `chat_tools` config key: live weather, time, calculator), and an
-  arrow-key model selector when no name is given. `run` pulls if needed
-  and chats right away.
+- **Chat**: interactive REPL with markdown-styled streaming, readline
+  prompt history, image input (`/image`), `/reset`, `/exit`, `/help`,
+  and an arrow-key model selector when no name is given. `run` pulls if
+  needed and chats right away. No bundled tools: `--tools` (or the
+  `chat_tools` config key) loads user-owned `~/.mlxh/tools.py`; a
+  weather/time/calculator example ships in `examples/tools.py`.
 - **Serve**: OpenAI-compatible API (`/v1/chat/completions` streaming and
   non-streaming, `/v1/models`), tool calling (OpenAI `tools` in,
   `tool_calls` out), vision via `image_url` parts. Single dedicated

@@ -50,7 +50,7 @@ mlxh link ~/some/existing/model --name mymodel                    # or symlink o
 mlxh list
 
 mlxh chat bonsai2                        # interactive: /image <path>, /reset, Ctrl-D
-mlxh chat bonsai2 -- --tools             # with built-in tools (weather, time, calc)
+mlxh chat bonsai2 -- --tools             # with your tools from ~/.mlxh/tools.py
 mlxh chat bonsai2 -- -p "one question"   # one-shot (args after the name pass through)
 
 mlxh serve bonsai2 --port 8081           # OpenAI-compatible API at /v1
@@ -90,12 +90,28 @@ The API supports `/v1/chat/completions` (streaming + non-streaming),
 via `image_url` parts (base64 data URLs or local paths). Point any OpenAI
 client at `http://localhost:<port>/v1` with any API key.
 
-The chat CLI ships three built-in tools the model can call: live weather,
-current time, and a safe calculator. They are **off by default** — enable per
-run with `--tools`, or persistently with `mlxh config chat_tools on`. The
-weather tool calls the free Open-Meteo API over the network; every tool
-execution is printed as it happens. Add your own in `src/mlxh/toolcalls.py`
-(`TOOL_REGISTRY` + `TOOL_SPECS`).
+## Chat tools
+
+mlxh ships **no tools** — by default the chat is a plain model REPL. To give
+the model tools, create `~/.mlxh/tools.py` (a file you own) and start a chat
+with `--tools`, or make that the default with `mlxh config chat_tools on`.
+The contract is two module-level names:
+
+- `TOOL_REGISTRY`: `{"tool_name": callable(**kwargs) -> dict}`
+- `TOOL_SPECS`: the same tools described in the OpenAI function-tool format
+
+A ready-made example (live weather via Open-Meteo, current time, a safe
+calculator) ships in [examples/tools.py](examples/tools.py):
+
+```bash
+cp examples/tools.py ~/.mlxh/tools.py
+mlxh chat <model> -- --tools
+```
+
+Every tool execution is printed as it happens, and tools run with your user's
+permissions — only put code in `tools.py` that you'd run yourself. The API
+server never executes tools: it returns `tool_calls` to the API client in the
+standard OpenAI format, and the client runs its own.
 
 Throughput numbers from the machine this was built on are in
 [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
