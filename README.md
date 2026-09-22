@@ -105,7 +105,8 @@ numeral for 1060) with any API key.
 The server also speaks the **Anthropic Messages API** (`/v1/messages`,
 streaming with keepalive pings, tool use, images, `count_tokens`), which is
 what Claude Code uses. `GET /mlxh/info` reports the live settings of a
-running server.
+running server. Full endpoint reference, request/response shapes, limits and
+SDK examples: [docs/API.md](docs/API.md).
 
 ## Coding agents
 

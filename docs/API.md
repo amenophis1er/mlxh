@@ -1,0 +1,135 @@
+# mlxh serve — REST API reference
+
+`mlxh serve <model>` exposes one model on `http://127.0.0.1:1060` (configurable
+via `port`/`host`). Authentication: none — any bearer token / API key is
+accepted. The server binds to localhost by default and must not be exposed
+beyond it as-is.
+
+Two client dialects are served side by side:
+
+| Dialect | Endpoints | Typical clients |
+|---|---|---|
+| OpenAI | `POST /v1/chat/completions`, `GET /v1/models` | OpenAI SDKs, LangChain, Codex, most tooling |
+| Anthropic | `POST /v1/messages`, `POST /v1/messages/count_tokens` | Anthropic SDKs, Claude Code |
+
+Plus `GET /mlxh/info` (mlxh-specific).
+
+## Execution model
+
+One generation runs at a time (single GPU, no continuous batching). Further
+requests queue, up to `max_queued`; beyond that the server answers **503**.
+A job always runs to completion once started, even if the client disconnects.
+With `prompt_cache` on (default), requests sharing a prefix with the previous
+request skip reprocessing those tokens.
+
+Server-side limits (see README "Server controls"):
+
+- `max_tokens` is clamped to `max_tokens_cap` (default 16384).
+- Prompts over `max_prompt_tokens` (default 8192) are rejected with **400**
+  and a message naming the size and the config command to raise it.
+- A generation exceeding `gen_timeout_s` (default 600) is stopped and
+  returned as-is.
+- MLX memory is capped (default 80% of RAM); allocations beyond it fail the
+  request with **500**, not the machine.
+
+Models whose chat template pre-opens a reasoning block (e.g. Bonsai) have the
+`<think>…</think>` reasoning stripped from responses; the `thinking` setting
+(`auto`/`on`/`off`) controls whether the model reasons at all.
+
+## OpenAI dialect
+
+### POST /v1/chat/completions
+
+Request fields honored: `messages`, `tools`, `max_tokens` (or
+`max_completion_tokens`), `temperature`, `top_p`, `stream`. The `model` field
+is accepted and ignored — the server serves the model it was started with
+(`GET /v1/models` tells you which).
+
+Message content may be a string or OpenAI content parts. Image parts are
+supported when the model has a vision tower:
+
+```json
+{"type": "image_url", "image_url": {"url": "data:image/png;base64,…"}}
+```
+
+A local file path is also accepted as the `url` (localhost server, local
+files).
+
+Tool calling is symmetric with OpenAI: send `tools` (function specs), get
+back `tool_calls` with `finish_reason: "tool_calls"`; return results as
+`role: "tool"` messages. The server never executes tools. `tool_choice` is
+not enforced (the model decides).
+
+Streaming is standard SSE `chat.completion.chunk` events ending with
+`data: [DONE]`; the final chunk carries `usage`. When `tools` are present the
+output is buffered and delivered once parseable (tool-call XML must be read
+whole). Comment lines (`: ping`) are emitted every 15s while the model is
+still processing the prompt — SSE-legal, ignored by clients.
+
+```bash
+curl http://localhost:1060/v1/chat/completions -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":100}'
+```
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://localhost:1060/v1", api_key="mlxh")
+r = client.chat.completions.create(model="local", stream=True,
+    messages=[{"role": "user", "content": "hi"}])
+```
+
+### GET /v1/models
+
+One entry: the loaded model, `id` = its mlxh name.
+
+## Anthropic dialect
+
+### POST /v1/messages
+
+Request fields honored: `system` (string or text blocks), `messages` with
+content blocks (`text`, `image` base64 source, `tool_use`, `tool_result`),
+`tools` (`name`/`description`/`input_schema`), `max_tokens`, `temperature`,
+`top_p`, `stream`. System-role messages appearing mid-conversation (agent
+"system reminders") are demoted to user messages rather than rejected.
+
+Responses are Anthropic message objects: `content` blocks (`text`,
+`tool_use`), `stop_reason` (`end_turn` / `max_tokens` / `tool_use`), `usage`
+with `input_tokens`/`output_tokens`.
+
+Streaming follows the Anthropic event protocol: `message_start` (emitted
+immediately), `content_block_start` / `content_block_delta`
+(`text_delta`, `input_json_delta`) / `content_block_stop`, `message_delta`
+(with `stop_reason` and usage), `message_stop` — with `ping` events every
+15s during prompt processing so agent clients don't mistake a slow model for
+a dead network. Errors mid-stream arrive as an `error` event.
+
+```python
+import anthropic
+client = anthropic.Anthropic(base_url="http://localhost:1060", api_key="mlxh")
+r = client.messages.create(model="local", max_tokens=100,
+    messages=[{"role": "user", "content": "hi"}])
+```
+
+### POST /v1/messages/count_tokens
+
+Returns `{"input_tokens": N}` — a character-based estimate (length/4), good
+enough for context budgeting, not exact.
+
+## mlxh
+
+### GET /mlxh/info
+
+```json
+{"model": "gemma4-12b", "settings": {"max_queued": 4, "max_tokens_cap": 16384, …}}
+```
+
+The live settings of *this server process* — config edits after startup are
+not reflected until restart (`mlxh launch` uses this to warn about stale
+servers).
+
+## Not implemented
+
+`n > 1`, `logprobs`, `response_format`/JSON mode, enforced `tool_choice`,
+`stop` sequences, embeddings, audio/video input, Anthropic `thinking` blocks
+in responses (reasoning is stripped instead), and multi-model serving — one
+server process serves one model; run several on different ports if needed.
