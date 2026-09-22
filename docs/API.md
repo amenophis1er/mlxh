@@ -9,7 +9,8 @@ Two client dialects are served side by side:
 
 | Dialect | Endpoints | Typical clients |
 |---|---|---|
-| OpenAI | `POST /v1/chat/completions`, `GET /v1/models` | OpenAI SDKs, LangChain, Codex, most tooling |
+| OpenAI chat | `POST /v1/chat/completions`, `GET /v1/models` | OpenAI SDKs, LangChain, most tooling |
+| OpenAI Responses | `POST /v1/responses` | Codex (modern versions speak only this) |
 | Anthropic | `POST /v1/messages`, `POST /v1/messages/count_tokens` | Anthropic SDKs, Claude Code |
 
 Plus `GET /mlxh/info` (mlxh-specific).
@@ -81,6 +82,22 @@ r = client.chat.completions.create(model="local", stream=True,
 ### GET /v1/models
 
 One entry: the loaded model, `id` = its mlxh name.
+
+### POST /v1/responses
+
+The OpenAI Responses API subset Codex needs. Honored: `instructions`,
+`input` (string, or items: `message` with `input_text`/`input_image`/
+`output_text` content, `function_call`, `function_call_output`), flat
+`tools` (function type), `max_output_tokens`, `temperature`, `top_p`,
+`stream`. Reasoning items are skipped.
+
+Output items are `message` (with `output_text` content) and
+`function_call`. Streaming follows the Responses event protocol:
+`response.created`, `response.output_item.added`,
+`response.content_part.added`, `response.output_text.delta` / `.done`,
+`response.content_part.done`, `response.output_item.done`,
+`response.completed` — with `: ping` comment keepalives during prompt
+processing, and `response.failed` on errors.
 
 ## Anthropic dialect
 

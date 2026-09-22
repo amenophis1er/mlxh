@@ -20,6 +20,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 
 from . import anthropic_compat as anth
+from . import responses_compat as oresp
 from .loader import load_runner
 from .toolcalls import parse_tool_calls
 
@@ -313,6 +314,116 @@ def anthropic_messages(body: dict):
         last.generation_tokens if last else 0,
         last.finish_reason if last else "stop",
     )
+
+
+@app.post("/v1/responses")
+def openai_responses(body: dict):
+    """OpenAI Responses API (what modern Codex speaks)."""
+    oai = oresp.to_openai_body(body)
+    chunks = submit(oai)
+    resp_id = f"resp_{uuid.uuid4().hex[:24]}"
+
+    def drain():
+        parts, last = [], None
+        while True:
+            item = chunks.get()
+            if item is None:
+                return "".join(parts), last, None
+            if isinstance(item, BaseException):
+                return "".join(parts), last, item
+            parts.append(item.text)
+            last = item
+            yield item
+
+    if body.get("stream"):
+        def sse():
+            ev = oresp.sse_event
+            yield ev("response.created", {
+                "type": "response.created",
+                "response": oresp.response_object(resp_id, MODEL_ID, [],
+                                                  oresp.usage_of(0, 0), "in_progress")})
+            parts, last, err, text_open = [], None, None, False
+            msg_item_id = f"msg_{uuid.uuid4().hex[:24]}"
+            printed = 0
+            while True:
+                try:
+                    item = chunks.get(timeout=15)
+                except queue.Empty:
+                    yield ": ping\n\n"
+                    continue
+                if item is None:
+                    break
+                if isinstance(item, BaseException):
+                    err = item
+                    break
+                last = item
+                parts.append(item.text)
+                full = "".join(parts)
+                cut = full.find(MARKER)
+                visible = full[:cut] if cut != -1 else full[: max(0, len(full) - len(MARKER))]
+                if len(visible) > printed:
+                    if not text_open:
+                        yield ev("response.output_item.added", {
+                            "type": "response.output_item.added", "output_index": 0,
+                            "item": {"id": msg_item_id, "type": "message",
+                                     "role": "assistant", "status": "in_progress",
+                                     "content": []}})
+                        yield ev("response.content_part.added", {
+                            "type": "response.content_part.added", "item_id": msg_item_id,
+                            "output_index": 0, "content_index": 0,
+                            "part": {"type": "output_text", "text": "", "annotations": []}})
+                        text_open = True
+                    yield ev("response.output_text.delta", {
+                        "type": "response.output_text.delta", "item_id": msg_item_id,
+                        "output_index": 0, "content_index": 0,
+                        "delta": visible[printed:]})
+                    printed = len(visible)
+            if err is not None:
+                yield ev("response.failed", {
+                    "type": "response.failed",
+                    "response": {**oresp.response_object(resp_id, MODEL_ID, [],
+                                                         oresp.usage_of(0, 0), "failed"),
+                                 "error": {"code": "server_error", "message": str(err)}}})
+                return
+            full = "".join(parts)
+            text, tool_calls = parse_tool_calls(full)
+            if text_open:
+                yield ev("response.output_text.done", {
+                    "type": "response.output_text.done", "item_id": msg_item_id,
+                    "output_index": 0, "content_index": 0, "text": text})
+                yield ev("response.content_part.done", {
+                    "type": "response.content_part.done", "item_id": msg_item_id,
+                    "output_index": 0, "content_index": 0,
+                    "part": {"type": "output_text", "text": text, "annotations": []}})
+            output = oresp.output_items(text, tool_calls)
+            for i, out_item in enumerate(output):
+                yield ev("response.output_item.done", {
+                    "type": "response.output_item.done", "output_index": i,
+                    "item": out_item})
+            usage = oresp.usage_of(last.prompt_tokens if last else 0,
+                                   last.generation_tokens if last else 0)
+            yield ev("response.completed", {
+                "type": "response.completed",
+                "response": oresp.response_object(resp_id, MODEL_ID, output, usage)})
+
+        return StreamingResponse(sse(), media_type="text/event-stream")
+
+    parts, last = [], None
+    while True:
+        item = chunks.get()
+        if item is None:
+            break
+        if isinstance(item, HTTPException):
+            raise item
+        if isinstance(item, BaseException):
+            raise HTTPException(500, str(item))
+        parts.append(item.text)
+        last = item
+    text, tool_calls = parse_tool_calls("".join(parts))
+    usage = oresp.usage_of(last.prompt_tokens if last else 0,
+                           last.generation_tokens if last else 0)
+    return oresp.response_object(resp_id, MODEL_ID,
+                                 oresp.output_items(text, tool_calls), usage)
 
 
 @app.post("/v1/messages/count_tokens")

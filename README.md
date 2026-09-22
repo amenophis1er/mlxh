@@ -122,8 +122,9 @@ mlxh launch claude --dry-run             # print the env + command instead
 
 `launch` starts a server if none is running (and stops it again when the
 agent exits), wires the agent up, and runs it. Anything after `--` passes
-through to the agent. claude/codex are wired via environment variables
-(`ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL`); pi is wired by registering an
+through to the agent. claude is wired via `ANTHROPIC_BASE_URL`; codex via
+`-c model_provider` overrides against the server's Responses API (works with
+ChatGPT-account Codex, which ignores `OPENAI_BASE_URL`); pi by registering an
 `mlxh` provider in `~/.pi/agent/models.json` (merged non-destructively, with
 the compat flags plain OpenAI-compatible servers need).
 

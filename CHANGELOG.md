@@ -27,6 +27,9 @@ Alpha: developed and tested on one machine
   auto-caps MLX memory at 80% of RAM and rejects prompts over
   `max_prompt_tokens` (default 8192) — a failed request instead of a
   frozen machine when a huge context balloons the KV cache.
+- **Three API dialects**: OpenAI chat completions, the OpenAI Responses
+  API (`/v1/responses`, what modern Codex requires), and the Anthropic
+  Messages API.
 - **Anthropic API + launch**: `serve` also speaks the Anthropic Messages
   API (`/v1/messages`, streaming and non-streaming, tool use, images,
   count_tokens), so Claude Code works against local models.

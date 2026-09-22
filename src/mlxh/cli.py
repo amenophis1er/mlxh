@@ -417,10 +417,16 @@ AGENTS = {
         {"ANTHROPIC_BASE_URL": f"http://127.0.0.1:{port}",
          "ANTHROPIC_AUTH_TOKEN": "mlxh", "ANTHROPIC_API_KEY": ""},
         ["--model", model]),
+    # ChatGPT-account Codex ignores OPENAI_BASE_URL; a model_provider
+    # override is the documented way to point it at a custom server.
     "codex": lambda port, model: (
-        {"OPENAI_BASE_URL": f"http://127.0.0.1:{port}/v1",
-         "OPENAI_API_KEY": "mlxh"},
-        ["--model", model]),
+        {"MLXH_API_KEY": "mlxh"},
+        ["-c", "model_providers.mlxh.name=mlxh",
+         "-c", f'model_providers.mlxh.base_url="http://127.0.0.1:{port}/v1"',
+         "-c", "model_providers.mlxh.wire_api=responses",
+         "-c", 'model_providers.mlxh.env_key="MLXH_API_KEY"',
+         "-c", "model_provider=mlxh",
+         "--model", model]),
     "pi": lambda port, model: (
         {},  # pi is configured via ~/.pi/agent/models.json, not env vars
         ["--provider", "mlxh", "--model", model, "--api-key", "mlxh"]),
