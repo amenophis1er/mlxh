@@ -20,8 +20,6 @@ Quick install, no clone needed (requires [uv](https://docs.astral.sh/uv/)):
 curl -fsSL https://raw.githubusercontent.com/amenophis1er/mlxh/main/install.sh | bash
 ```
 
-(While this repo is private, `export GITHUB_TOKEN=<a token with repo read>` first.)
-
 Or from a checkout:
 
 ```bash

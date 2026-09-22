@@ -5,7 +5,6 @@
 # Works two ways:
 #   from a checkout:  ./install.sh
 #   without a clone:  curl -fsSL https://raw.githubusercontent.com/amenophis1er/mlxh/main/install.sh | bash
-# (while the repo is private, export GITHUB_TOKEN=<token> first)
 set -euo pipefail
 
 REPO="amenophis1er/mlxh"
