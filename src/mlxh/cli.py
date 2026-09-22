@@ -130,20 +130,10 @@ def pick_model(cfg, purpose):
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         ui.fail(f"which model do you want to {purpose}?",
                 f"available: {', '.join(models)}")
-    print(ui.dim(f"select a model to {purpose}:"))
-    for i, n in enumerate(models, 1):
-        print(f"  {i}) {n}")
-    while True:
-        try:
-            choice = input("> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            sys.exit(130)
-        if choice.isdigit() and 1 <= int(choice) <= len(models):
-            return models[int(choice) - 1]
-        if choice in models:
-            return choice
-        print(ui.dim(f"enter 1-{len(models)} or a model name"))
+    paths = discover(cfg)
+    idx = ui.select(f"select a model to {purpose}  (↑/↓, enter)",
+                    models, [source_of(paths[n]) for n in models])
+    return models[idx]
 
 
 def cmd_search(args):
