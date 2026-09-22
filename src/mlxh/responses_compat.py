@@ -41,9 +41,11 @@ def to_openai_body(body):
     for item in items:
         kind = item.get("type", "message")
         if kind == "message":
-            role = item.get("role", "user")
-            if role == "system" and messages and messages[0]["role"] == "system":
-                role = "user"  # keep templates happy: one leading system max
+            # Codex sends "developer" for its instructions; strict chat
+            # templates (Bonsai) reject roles they don't know.
+            role = {"developer": "system", "system": "system",
+                    "assistant": "assistant", "tool": "tool"}.get(
+                        item.get("role", "user"), "user")
             content = _content_to_parts(item.get("content"))
             messages.append({"role": role, "content": content})
         elif kind == "function_call":
@@ -65,6 +67,11 @@ def to_openai_body(body):
         }}
         for t in body.get("tools") or [] if t.get("type") == "function"
     ]
+
+    # strict templates allow at most one system message, and only first
+    for i, m in enumerate(messages):
+        if i > 0 and m.get("role") == "system":
+            m["role"] = "user"
 
     out = {"messages": messages,
            "max_tokens": body.get("max_output_tokens") or body.get("max_tokens") or 4096}

@@ -53,3 +53,23 @@ def test_output_items_and_response_object():
     resp = oresp.response_object("resp_1", "m", items, oresp.usage_of(10, 5))
     assert resp["status"] == "completed"
     assert resp["usage"]["total_tokens"] == 15
+
+
+def test_developer_role_normalized():
+    body = {"input": [
+        {"type": "message", "role": "developer",
+         "content": [{"type": "input_text", "text": "rules"}]},
+        {"type": "message", "role": "user", "content": "hi"},
+        {"type": "message", "role": "developer",
+         "content": [{"type": "input_text", "text": "reminder"}]},
+        {"type": "message", "role": "critic", "content": "??"},
+    ]}
+    msgs = oresp.to_openai_body(body)["messages"]
+    assert [m["role"] for m in msgs] == ["system", "user", "user", "user"]
+
+
+def test_instructions_plus_developer_single_leading_system():
+    body = {"instructions": "top", "input": [
+        {"type": "message", "role": "developer", "content": "rules"}]}
+    msgs = oresp.to_openai_body(body)["messages"]
+    assert [m["role"] for m in msgs] == ["system", "user"]
