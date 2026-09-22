@@ -1,8 +1,8 @@
 # Changelog
 
-## v0.1.0 — 2026-09-22
+## v0.1.0 — unreleased
 
-First tagged release. Alpha: developed and tested on one machine
+Alpha: developed and tested on one machine
 (MacBook Pro M5 Pro, 48 GB, macOS 26); interfaces may change.
 
 - **Models**: `search` (params/size/downloads from Hugging Face), `pull`
