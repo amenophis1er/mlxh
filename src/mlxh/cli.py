@@ -8,7 +8,7 @@ Commands:
   mlxh mv <name> <new-name>           rename a model
   mlxh rm <name>                      remove a model (links: symlink only)
   mlxh serve <name> [--port N ...]    OpenAI + Anthropic compatible API server
-  mlxh launch <agent> [--model NAME]  run a coding agent (claude, codex) on a model
+  mlxh launch <agent> [--model NAME]  run a coding agent (claude, codex, pi)
   mlxh chat <name> [chat args...]     terminal chat (tools, images, streaming)
   mlxh config [key [value]]           show or set config
   mlxh uninstall                      remove mlxh and everything it manages
@@ -421,7 +421,37 @@ AGENTS = {
         {"OPENAI_BASE_URL": f"http://127.0.0.1:{port}/v1",
          "OPENAI_API_KEY": "mlxh"},
         ["--model", model]),
+    "pi": lambda port, model: (
+        {},  # pi is configured via ~/.pi/agent/models.json, not env vars
+        ["--provider", "mlxh", "--model", model, "--api-key", "mlxh"]),
 }
+
+
+def pi_register_provider(port, model, path=None):
+    """Merge an 'mlxh' provider into pi's models.json (non-destructively)."""
+    path = path or Path.home() / ".pi" / "agent" / "models.json"
+    data = {}
+    if path.is_file():
+        try:
+            data = json.loads(path.read_text() or "{}")
+        except json.JSONDecodeError:
+            ui.fail(f"{path} is not valid JSON; fix it before launching pi")
+    providers = data.setdefault("providers", {})
+    prov = providers.setdefault("mlxh", {})
+    prov.update({
+        "baseUrl": f"http://127.0.0.1:{port}/v1",
+        "api": "openai-completions",
+        "apiKey": "mlxh",
+        # plain OpenAI-compatible server: no developer role / reasoning_effort
+        "compat": {"supportsDeveloperRole": False,
+                   "supportsReasoningEffort": False},
+    })
+    models = prov.setdefault("models", [])
+    if not any(m.get("id") == model for m in models):
+        models.append({"id": model})
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2))
+    return path
 
 
 def cmd_launch(args):
@@ -518,6 +548,9 @@ def cmd_launch(args):
                 ui.note("restart the server to apply the new settings")
         except Exception:
             pass
+
+    if args.agent == "pi":
+        ui.note(f"registered provider 'mlxh' in {pi_register_provider(port, name)}")
 
     if not _shutil.which(args.agent):
         if started:
@@ -646,8 +679,8 @@ def main():
     p.add_argument("--thinking", choices=["auto", "on", "off"], dest="thinking")
     p.set_defaults(fn=cmd_serve)
 
-    p = sub.add_parser("launch", help="launch a coding agent (claude, codex) on a local model")
-    p.add_argument("agent", help="claude or codex")
+    p = sub.add_parser("launch", help="launch a coding agent (claude, codex, pi) on a local model")
+    p.add_argument("agent", help="claude, codex, or pi")
     p.add_argument("--model")
     p.add_argument("--port", type=int)
     p.add_argument("--dry-run", action="store_true", help="print env + command instead of running")

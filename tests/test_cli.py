@@ -125,3 +125,21 @@ def test_serve_argv_includes_all_knobs(mdir):
     assert "--max-prompt-tokens" in argv and "--port" in argv
     assert argv[argv.index("--port") + 1] == "9999"
     assert argv[argv.index("--max-prompt-tokens") + 1] == str(cfg["max_prompt_tokens"])
+
+
+def test_pi_register_provider(tmp_path):
+    path = tmp_path / "models.json"
+    path.write_text(json.dumps({"providers": {"ollama": {"baseUrl": "http://x"}}}))
+    out = cli.pi_register_provider(1060, "gemma4-12b", path=path)
+    data = json.loads(out.read_text())
+    assert data["providers"]["ollama"]["baseUrl"] == "http://x"  # untouched
+    prov = data["providers"]["mlxh"]
+    assert prov["baseUrl"] == "http://127.0.0.1:1060/v1"
+    assert prov["compat"]["supportsDeveloperRole"] is False
+    assert {"id": "gemma4-12b"} in prov["models"]
+    # idempotent + adds second model
+    cli.pi_register_provider(2000, "qwen-tiny", path=path)
+    prov = json.loads(path.read_text())["providers"]["mlxh"]
+    assert prov["baseUrl"].endswith(":2000/v1")
+    assert len([m for m in prov["models"] if m["id"] == "gemma4-12b"]) == 1
+    assert {"id": "qwen-tiny"} in prov["models"]

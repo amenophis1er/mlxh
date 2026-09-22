@@ -113,13 +113,16 @@ SDK examples: [docs/API.md](docs/API.md).
 ```bash
 mlxh launch claude --model gemma4-12b --no-mcp
 mlxh launch codex --model gemma4-12b
+mlxh launch pi --model gemma4-12b
 mlxh launch claude --dry-run             # print the env + command instead
 ```
 
 `launch` starts a server if none is running (and stops it again when the
-agent exits), wires the agent's environment (`ANTHROPIC_BASE_URL` /
-`OPENAI_BASE_URL`), and runs it. Anything after `--` passes through to the
-agent.
+agent exits), wires the agent up, and runs it. Anything after `--` passes
+through to the agent. claude/codex are wired via environment variables
+(`ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL`); pi is wired by registering an
+`mlxh` provider in `~/.pi/agent/models.json` (merged non-destructively, with
+the compat flags plain OpenAI-compatible servers need).
 
 Practical notes:
 
