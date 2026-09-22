@@ -8,7 +8,12 @@ Two families are supported behind one Runner interface:
 
 import json
 import sys
+import warnings
 from pathlib import Path
+
+# Gemma-style audio towers trip a harmless mel-filter warning while their
+# (unused) audio preprocessor initializes; keep startup clean.
+warnings.filterwarnings("ignore", message=".*mel filter.*", category=UserWarning)
 
 
 class VLMRunner:
