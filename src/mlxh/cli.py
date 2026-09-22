@@ -482,10 +482,25 @@ def cmd_launch(args):
             if started.poll() is not None or time.time() > deadline:
                 ui.fail("server failed to start", f"see {HOME / 'serve.log'}")
             time.sleep(1)
-    elif serving != name:
-        ui.note(f"reusing running server on port {port} (serving '{serving}', not '{name}')")
     else:
-        ui.note(f"reusing running server on port {port}")
+        if serving != name:
+            ui.note(f"reusing running server on port {port} (serving '{serving}', not '{name}')")
+        else:
+            ui.note(f"reusing running server on port {port}")
+        # A running server keeps the settings it started with; warn when the
+        # config has moved on (the classic: raising max_prompt_tokens after
+        # the server was already up).
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/mlxh/info", timeout=2) as r:
+                live = json.loads(r.read())["settings"]
+            stale = {k: (live[k], cfg[k]) for k in live
+                     if k in cfg and live[k] != cfg[k]}
+            if stale:
+                for k, (have, want) in stale.items():
+                    ui.note(f"warning: running server has {k}={have}, config says {want}")
+                ui.note("restart the server to apply the new settings")
+        except Exception:
+            pass
 
     if not _shutil.which(args.agent):
         if started:

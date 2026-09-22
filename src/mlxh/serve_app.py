@@ -297,6 +297,12 @@ def anthropic_count_tokens(body: dict):
     return {"input_tokens": max(1, len(text) // 4)}
 
 
+@app.get("/mlxh/info")
+def info():
+    """Settings of THIS server process — config edits only apply to new servers."""
+    return {"model": MODEL_ID, "settings": SETTINGS}
+
+
 @app.get("/v1/models")
 def models():
     return {
