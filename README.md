@@ -14,13 +14,23 @@ Supports two model families behind one interface:
 
 ## Install
 
+Quick install, no clone needed (requires [uv](https://docs.astral.sh/uv/)):
+
 ```bash
-git clone https://github.com/amenophis1er/mlxh.git
-cd mlxh
-./install.sh          # needs uv; installs to ~/.mlxh, launcher in ~/.local/bin
+curl -fsSL https://raw.githubusercontent.com/amenophis1er/mlxh/main/install.sh | bash
 ```
 
-Override locations with `MLXH_HOME` / `MLXH_BIN`.
+(While this repo is private, `export GITHUB_TOKEN=<a token with repo read>` first.)
+
+Or from a checkout:
+
+```bash
+git clone https://github.com/amenophis1er/mlxh.git && cd mlxh && ./install.sh
+```
+
+Either way it installs to `~/.mlxh` with the launcher in `~/.local/bin`;
+override locations with `MLXH_HOME` / `MLXH_BIN`. Re-running the installer
+updates the app code in place (models and config are untouched).
 
 ## Use
 

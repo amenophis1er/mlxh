@@ -1,13 +1,33 @@
 #!/bin/bash
 # Install mlxh into $MLXH_HOME (default ~/.mlxh) and a launcher into $MLXH_BIN
 # (default ~/.local/bin). Requires uv (https://docs.astral.sh/uv/).
+#
+# Works two ways:
+#   from a checkout:  ./install.sh
+#   without a clone:  curl -fsSL https://raw.githubusercontent.com/amenophis1er/mlxh/main/install.sh | bash
+# (while the repo is private, export GITHUB_TOKEN=<token> first)
 set -euo pipefail
 
+REPO="amenophis1er/mlxh"
 PREFIX="${MLXH_HOME:-$HOME/.mlxh}"
 BIN="${MLXH_BIN:-$HOME/.local/bin}"
-SRC="$(cd "$(dirname "$0")" && pwd)"
+SRC="$(cd "$(dirname "$0")" 2>/dev/null && pwd || true)"
 
 command -v uv >/dev/null || { echo "error: uv is required (brew install uv)"; exit 1; }
+
+if [ -z "$SRC" ] || [ ! -d "$SRC/app" ]; then
+  # Not running from a checkout (e.g. curl | bash): fetch the repo tarball.
+  command -v curl >/dev/null || { echo "error: curl is required"; exit 1; }
+  TMP="$(mktemp -d)"
+  trap 'rm -rf "$TMP"' EXIT
+  AUTH=()
+  [ -n "${GITHUB_TOKEN:-}" ] && AUTH=(-H "Authorization: token $GITHUB_TOKEN")
+  echo "Fetching $REPO ..."
+  curl -fsSL "${AUTH[@]}" "https://api.github.com/repos/$REPO/tarball/main" \
+    | tar -xz -C "$TMP"
+  SRC="$(find "$TMP" -mindepth 1 -maxdepth 1 -type d | head -1)"
+  [ -d "$SRC/app" ] || { echo "error: download did not contain app/"; exit 1; }
+fi
 
 echo "Installing mlxh into $PREFIX"
 mkdir -p "$PREFIX" "$BIN"
