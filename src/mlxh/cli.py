@@ -150,6 +150,17 @@ def cmd_search(args):
     print(f"\ninstall one with: mlxh pull <repo-id>")
 
 
+def total_ram_bytes():
+    try:
+        return os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    except (ValueError, OSError, AttributeError):
+        try:
+            import subprocess
+            return int(subprocess.check_output(["sysctl", "-n", "hw.memsize"]).strip())
+        except Exception:
+            return 0
+
+
 def cmd_pull(args):
     cfg = load_config()
     name = args.name or args.repo.split("/")[-1]
@@ -160,8 +171,30 @@ def cmd_pull(args):
     os.environ.setdefault("HF_HOME", str(HOME / "hf-cache"))
     from datetime import datetime, timezone
     from huggingface_hub import HfApi, snapshot_download
-    print(f"Downloading {args.repo} -> {dest}")
-    snapshot_download(args.repo, local_dir=str(dest))
+
+    try:
+        size = sum(s.size or 0 for s in
+                   HfApi().model_info(args.repo, files_metadata=True).siblings)
+    except Exception:
+        size = 0  # can't size it (offline, gated, ...): proceed without guardrails
+    if size:
+        free = shutil.disk_usage(dest.parent).free
+        if size + 2e9 > free:  # keep a 2 GB margin
+            sys.exit(f"refusing: {args.repo} is {size / 1e9:.1f} GB but only "
+                     f"{free / 1e9:.1f} GB free on {dest.parent}")
+        ram = total_ram_bytes()
+        if ram and size > 0.9 * ram and not args.force:
+            sys.exit(f"refusing: {args.repo} is {size / 1e9:.1f} GB of weights but this "
+                     f"machine has {ram / 1e9:.0f} GB unified memory — it won't load. "
+                     f"Use --force to download anyway (e.g. for another machine).")
+
+    print(f"Downloading {args.repo}{f' ({size / 1e9:.1f} GB)' if size else ''} -> {dest}")
+    try:
+        snapshot_download(args.repo, local_dir=str(dest))
+    except Exception as e:
+        shutil.rmtree(dest, ignore_errors=True)
+        sys.exit(f"download failed: {type(e).__name__}: {e}\n"
+                 f"(check the repo id with `mlxh search`; gated repos need `hf auth login`)")
     try:
         revision = HfApi().model_info(args.repo).sha or ""
     except Exception:
@@ -296,6 +329,8 @@ def main():
     p = sub.add_parser("pull", help="download a model from Hugging Face")
     p.add_argument("repo")
     p.add_argument("--name")
+    p.add_argument("--force", action="store_true",
+                   help="download even if it exceeds this machine's memory")
     p.set_defaults(fn=cmd_pull)
 
     p = sub.add_parser("link", help="symlink an existing local model directory in")
