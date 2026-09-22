@@ -103,7 +103,8 @@ def main():
         return
 
     hint = "/image <path> attaches an image to your next message,\n" if runner.supports_images else ""
-    print(f"Interactive chat. {hint}/reset clears history, Ctrl-D exits.", file=sys.stderr)
+    print(f"Interactive chat. {hint}/reset clears history, /exit quits (Ctrl-D too).",
+          file=sys.stderr)
     history, staged = [], []
     while True:
         tag = f" [{len(staged)} img]" if staged else ""
@@ -114,6 +115,8 @@ def main():
             break
         if not user:
             continue
+        if user in ("/exit", "/bye", "/quit"):
+            break
         if user == "/reset":
             history, staged = [], []
             print("(history cleared)", file=sys.stderr)

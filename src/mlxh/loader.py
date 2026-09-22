@@ -7,9 +7,14 @@ Two families are supported behind one Runner interface:
 """
 
 import json
+import os
 import sys
 import warnings
 from pathlib import Path
+
+# Must be set before transformers is first imported: silences import-time
+# advisories (e.g. "PyTorch was not found") the user can't act on.
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 
 # Gemma-style audio towers trip a harmless mel-filter warning while their
 # (unused) audio preprocessor initializes; keep startup clean.
@@ -68,7 +73,18 @@ class TextRunner:
         )
 
 
+def _quiet_libraries():
+    # Load-time advisories the user can't act on (unknown custom model_type,
+    # tokenizer-regex heuristics); the pack runtimes own those choices.
+    try:
+        from transformers.utils import logging as hf_logging
+        hf_logging.set_verbosity_error()
+    except Exception:
+        pass
+
+
 def load_runner(model_dir):
+    _quiet_libraries()
     model_dir = Path(model_dir)
     cfg_path = model_dir / "config.json"
     cfg = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
