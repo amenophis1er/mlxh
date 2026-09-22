@@ -1,7 +1,7 @@
 """OpenAI-compatible REST API for any mlxh-managed model.
 
 Invoked by `mlxh serve <model>`; can also run standalone:
-    python serve_app.py --model-path /path/to/model --name mymodel --port 8081
+    python serve_app.py --model-path /path/to/model --name mymodel --port 1060
 """
 
 import argparse
@@ -402,7 +402,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model-path", required=True)
     ap.add_argument("--name", default=None)
-    ap.add_argument("--port", type=int, default=8081)
+    ap.add_argument("--port", type=int, default=1060)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--max-queued", type=int, default=SETTINGS["max_queued"])
     ap.add_argument("--max-tokens-cap", type=int, default=SETTINGS["max_tokens_cap"])

@@ -53,8 +53,8 @@ mlxh chat bonsai2                        # interactive: /image <path>, /reset, C
 mlxh chat bonsai2 -- --tools             # with your tools from ~/.mlxh/tools.py
 mlxh chat bonsai2 -- -p "one question"   # one-shot (args after the name pass through)
 
-mlxh serve bonsai2 --port 8081           # OpenAI-compatible API at /v1
-mlxh config port 8082                    # persistent defaults
+mlxh serve bonsai2                       # OpenAI-compatible API at :1060/v1
+mlxh config port 1234                    # persistent defaults
 
 mlxh mv gemma-4-E4B-it-MLX-4bit gemma4   # rename to a nicer alias
 mlxh rm bonsai2                          # delete pulled weights (links: symlink only)
@@ -95,7 +95,8 @@ box with vLLM / llama.cpp `--parallel`.
 The API supports `/v1/chat/completions` (streaming + non-streaming),
 `/v1/models`, tool calling (OpenAI `tools` in, `tool_calls` out), and vision
 via `image_url` parts (base64 data URLs or local paths). Point any OpenAI
-client at `http://localhost:<port>/v1` with any API key.
+client at `http://localhost:1060/v1` (the default port: MLX is the Roman
+numeral for 1060) with any API key.
 
 ## Chat tools
 

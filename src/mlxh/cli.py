@@ -19,7 +19,7 @@ subdirectory of the models dir that holds a config.json is a usable model.
 `models_dir` config key, overridable with $MLXH_MODELS_DIR.
 
 Config keys (mlxh config <key> <value>):
-  port, host          server defaults
+  port, host          server defaults (port 1060 — "MLX" in Roman numerals)
   models_dir          where models live (default $MLXH_HOME/models)
   max_queued          pending generations beyond the active one before 503 (4)
   max_tokens_cap      server-side ceiling on max_tokens, 0 = unlimited (16384)
@@ -45,7 +45,7 @@ from . import ui
 HOME = Path(os.environ.get("MLXH_HOME", Path.home() / ".mlxh"))
 CONFIG = HOME / "config.json"
 DEFAULTS = {
-    "port": 8081,
+    "port": 1060,
     "host": "127.0.0.1",
     "models_dir": str(HOME / "models"),
     "max_queued": 4,

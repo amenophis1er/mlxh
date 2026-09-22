@@ -15,7 +15,8 @@ Alpha: developed and tested on one machine
   needed and chats right away. No bundled tools: `--tools` (or the
   `chat_tools` config key) loads user-owned `~/.mlxh/tools.py`; a
   weather/time/calculator example ships in `examples/tools.py`.
-- **Serve**: OpenAI-compatible API (`/v1/chat/completions` streaming and
+- **Serve**: OpenAI-compatible API on port 1060 by default ("MLX" in
+  Roman numerals — rare on purpose) (`/v1/chat/completions` streaming and
   non-streaming, `/v1/models`), tool calling (OpenAI `tools` in,
   `tool_calls` out), vision via `image_url` parts. Single dedicated
   generation thread (MLX streams are per-thread), disconnect-proof job
