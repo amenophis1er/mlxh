@@ -27,6 +27,8 @@ Config keys (mlxh config <key> <value>):
   cache_limit_gb      MLX buffer-cache limit, 0 = off
   gen_timeout_s       hard stop for one generation, 0 = off (600)
   max_prompt_tokens   reject prompts bigger than this, 0 = off (8192)
+  prompt_cache        reuse KV blocks across requests (true)
+  thinking            model reasoning: auto / on / off (auto)
   chat_tools          load ~/.mlxh/tools.py in chat by default (false)
 
 State lives under $MLXH_HOME (default ~/.mlxh): venv, app code, config,
@@ -54,6 +56,8 @@ DEFAULTS = {
     "cache_limit_gb": 0.0,
     "gen_timeout_s": 600,
     "max_prompt_tokens": 8192,
+    "prompt_cache": True,
+    "thinking": "auto",
     "chat_tools": False,
 }
 def _bool(v):
@@ -67,7 +71,8 @@ def _bool(v):
 KEY_TYPES = {
     "port": int, "host": str, "models_dir": str, "max_queued": int,
     "max_tokens_cap": int, "memory_limit_gb": float, "cache_limit_gb": float,
-    "gen_timeout_s": int, "max_prompt_tokens": int, "chat_tools": _bool,
+    "gen_timeout_s": int, "max_prompt_tokens": int, "prompt_cache": _bool,
+    "thinking": str, "chat_tools": _bool,
 }
 
 
@@ -384,6 +389,8 @@ def serve_argv(cfg, name, path, overrides=None):
         "--cache-limit-gb", str(pick("cache_limit_gb")),
         "--gen-timeout-s", str(pick("gen_timeout_s")),
         "--max-prompt-tokens", str(pick("max_prompt_tokens")),
+        "--prompt-cache", str(pick("prompt_cache")),
+        "--thinking", str(pick("thinking")),
     ]
 
 
@@ -394,7 +401,7 @@ def cmd_serve(args):
     overrides = {k: getattr(args, k) for k in
                  ("port", "host", "max_queued", "max_tokens_cap",
                   "memory_limit_gb", "cache_limit_gb", "gen_timeout_s",
-                  "max_prompt_tokens")}
+                  "max_prompt_tokens", "prompt_cache", "thinking")}
     os.execv(sys.executable, serve_argv(cfg, name, path, overrides))
 
 
@@ -635,6 +642,8 @@ def main():
     p.add_argument("--cache-limit-gb", type=float, dest="cache_limit_gb")
     p.add_argument("--gen-timeout-s", type=int, dest="gen_timeout_s")
     p.add_argument("--max-prompt-tokens", type=int, dest="max_prompt_tokens")
+    p.add_argument("--prompt-cache", dest="prompt_cache")
+    p.add_argument("--thinking", choices=["auto", "on", "off"], dest="thinking")
     p.set_defaults(fn=cmd_serve)
 
     p = sub.add_parser("launch", help="launch a coding agent (claude, codex) on a local model")

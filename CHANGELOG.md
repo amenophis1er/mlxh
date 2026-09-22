@@ -33,6 +33,12 @@ Alpha: developed and tested on one machine
   `mlxh launch claude|codex [--model NAME]` starts a server if needed,
   wires the agent's environment, and runs it (`--dry-run` prints the
   wiring).
+- **Prompt caching + thinking**: the server reuses KV blocks across
+  requests (mlx-vlm automatic prefix caching; `prompt_cache` config) so
+  same-prefix follow-ups skip prompt reprocessing. `thinking auto/on/off`
+  controls reasoning models; templates that pre-open a think block have
+  the reasoning stripped from API responses and rendered dimmed in chat
+  (`--thinking` / `--no-thinking`).
 - **Loaders**: stock MLX models via mlx-vlm/mlx-lm, Prism Hadamard packs
   via their bundled runtime, behind one Runner interface.
 - **Install**: `curl | bash` (self-bootstrapping installer),

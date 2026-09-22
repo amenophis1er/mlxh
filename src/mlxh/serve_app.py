@@ -33,6 +33,8 @@ SETTINGS = {
     "cache_limit_gb": 0.0,    # MLX buffer-cache limit; 0 = off
     "gen_timeout_s": 600,     # hard stop for one generation; 0 = off
     "max_prompt_tokens": 8192,  # reject bigger prompts (KV cache = memory); 0 = off
+    "prompt_cache": True,   # reuse KV blocks across requests (agents: huge TTFT win)
+    "thinking": "auto",     # reasoning mode: auto (model default) / on / off
 }
 
 # All MLX work (model load AND generation) happens on one dedicated thread —
@@ -70,6 +72,9 @@ def gen_worker(model_path):
     except RuntimeError as e:
         print(e, flush=True)
         os._exit(1)
+    if SETTINGS["prompt_cache"] and getattr(runner, "supports_cache", False):
+        runner.enable_cache()
+        print("[apc] prompt cache enabled (65k-token block pool)", flush=True)
     print(f"Ready in {time.perf_counter() - t0:.1f}s "
           f"(images: {'yes' if runner.supports_images else 'no'})", flush=True)
     ready.set()
@@ -155,7 +160,9 @@ def run_generation(body):
     if SETTINGS["max_tokens_cap"]:
         max_tokens = min(max_tokens, SETTINGS["max_tokens_cap"])
     tools = body.get("tools") or None
-    prompt = runner.template(messages, num_images=len(images), tools=tools)
+    thinking = {"on": True, "off": False}.get(SETTINGS["thinking"])
+    prompt = runner.template(messages, num_images=len(images), tools=tools,
+                             thinking=thinking)
     cap = SETTINGS["max_prompt_tokens"]
     if cap:
         n_prompt = len(prompt) if isinstance(prompt, (list, tuple)) else len(prompt) // 4
@@ -170,12 +177,24 @@ def run_generation(body):
           f"{len(tools or [])} tools, max_tokens={max_tokens}", flush=True)
     t0 = time.perf_counter()
     last = None
+    # When the template pre-opens a reasoning block, the model's output starts
+    # mid-<think>; hold it back so clients only see the actual answer.
+    pending = "" if (isinstance(prompt, str)
+                     and prompt.rstrip().endswith("<think>")) else None
     try:
         for resp in runner.stream(
             prompt, images=images, max_tokens=max_tokens,
             temperature=body.get("temperature"), top_p=body.get("top_p"),
         ):
             last = resp
+            if pending is not None:
+                pending += resp.text
+                if "</think>" not in pending:
+                    continue
+                import dataclasses
+                after = pending.split("</think>", 1)[1].lstrip("\n")
+                pending = None
+                resp = dataclasses.replace(resp, text=after)
             yield resp
     finally:
         for f in tmp_files:
@@ -426,11 +445,16 @@ def main():
     ap.add_argument("--cache-limit-gb", type=float, default=SETTINGS["cache_limit_gb"])
     ap.add_argument("--gen-timeout-s", type=int, default=SETTINGS["gen_timeout_s"])
     ap.add_argument("--max-prompt-tokens", type=int, default=SETTINGS["max_prompt_tokens"])
+    ap.add_argument("--prompt-cache", default=str(SETTINGS["prompt_cache"]))
+    ap.add_argument("--thinking", choices=["auto", "on", "off"],
+                    default=SETTINGS["thinking"])
     args = ap.parse_args()
     SETTINGS.update(
         max_queued=args.max_queued, max_tokens_cap=args.max_tokens_cap,
         memory_limit_gb=args.memory_limit_gb, cache_limit_gb=args.cache_limit_gb,
         gen_timeout_s=args.gen_timeout_s, max_prompt_tokens=args.max_prompt_tokens,
+        prompt_cache=str(args.prompt_cache).lower() in ("1", "true", "on", "yes"),
+        thinking=args.thinking,
     )
     MODEL_ID = args.name or Path(args.model_path).name
     threading.Thread(target=gen_worker, args=(args.model_path,), daemon=True).start()

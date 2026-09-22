@@ -23,13 +23,22 @@ warnings.filterwarnings("ignore", message=".*mel filter.*", category=UserWarning
 
 class VLMRunner:
     supports_images = True
+    supports_cache = True
 
     def __init__(self, model, processor, config):
         self.model, self.processor, self.config = model, processor, config
+        self.apc = None
 
-    def template(self, messages, num_images=0, tools=None):
+    def enable_cache(self, num_blocks=4096, block_size=16):
+        """Automatic prefix caching: reuse KV blocks across requests."""
+        from mlx_vlm.apc import APCManager
+        self.apc = APCManager(num_blocks=num_blocks, block_size=block_size)
+
+    def template(self, messages, num_images=0, tools=None, thinking=None):
         from mlx_vlm.prompt_utils import apply_chat_template
         kwargs = {"tools": tools} if tools else {}
+        if thinking is not None:
+            kwargs["enable_thinking"] = thinking
         return apply_chat_template(
             self.processor, self.config, messages, num_images=num_images, **kwargs
         )
@@ -41,6 +50,8 @@ class VLMRunner:
             kwargs["temperature"] = temperature
         if top_p is not None:
             kwargs["top_p"] = top_p
+        if self.apc is not None:
+            kwargs["apc_manager"] = self.apc
         yield from stream_generate(
             self.model, self.processor, prompt,
             image=images or None, max_tokens=max_tokens, **kwargs,
@@ -49,12 +60,15 @@ class VLMRunner:
 
 class TextRunner:
     supports_images = False
+    supports_cache = False  # text-only models: caching lands later
 
     def __init__(self, model, tokenizer):
         self.model, self.tokenizer = model, tokenizer
 
-    def template(self, messages, num_images=0, tools=None):
+    def template(self, messages, num_images=0, tools=None, thinking=None):
         kwargs = {"tools": tools} if tools else {}
+        if thinking is not None:
+            kwargs["enable_thinking"] = thinking
         return self.tokenizer.apply_chat_template(
             messages, tokenize=True, add_generation_prompt=True, **kwargs
         )

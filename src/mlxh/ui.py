@@ -141,23 +141,49 @@ class StreamRenderer:
     CODE, UNCODE = "\x1b[36m", "\x1b[39m"
     DIM, UNDIM = "\x1b[2m", "\x1b[22m"
 
-    def __init__(self, out=None):
+    def __init__(self, out=None, think_open=False):
         self.out = out or sys.stdout
         self.enabled = _colors_on(self.out)
         self.carry = ""
         self.bold = self.code = self.fence = self.heading = False
         self.line_start = True
+        # think_open: the chat template pre-opened a <think> block, so the
+        # stream begins with reasoning; render it dim until </think>.
+        self.reasoning = think_open
+        self._rbuf = ""
+        if self.reasoning and self.enabled:
+            self.out.write(self.DIM)
 
     def feed(self, text):
         if not self.enabled:
             self.out.write(text)
             self.out.flush()
             return
+        if self.reasoning:
+            self._rbuf += text
+            tag = "</think>"
+            cut = self._rbuf.find(tag)
+            if cut == -1:
+                safe = max(0, len(self._rbuf) - len(tag))
+                self.out.write(self._rbuf[:safe])
+                self._rbuf = self._rbuf[safe:]
+                self.out.flush()
+                return
+            self.out.write(self._rbuf[:cut] + self.UNDIM + "\n\n")
+            text = self._rbuf[cut + len(tag):].lstrip("\n")
+            self._rbuf, self.reasoning = "", False
+            if not text:
+                return
         buf, self.carry = self.carry + text, ""
         self._process(buf, final=False)
 
     def finish(self):
         if not self.enabled:
+            return
+        if self.reasoning:
+            self.out.write(self._rbuf + "\x1b[0m")
+            self._rbuf, self.reasoning = "", False
+            self.out.flush()
             return
         if self.carry:
             buf, self.carry = self.carry, ""

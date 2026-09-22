@@ -103,3 +103,37 @@ def test_stream_unclosed_style_reset_on_finish():
     r.feed("**oops")
     r.finish()
     assert buf.getvalue().endswith("\x1b[0m")
+
+
+def test_stream_reasoning_dimmed_until_close():
+    buf = io.StringIO()
+    r = ui.StreamRenderer.__new__(ui.StreamRenderer)
+    r.out, r.enabled, r.carry = buf, True, ""
+    r.bold = r.code = r.fence = r.heading = False
+    r.line_start, r.reasoning, r._rbuf = True, True, ""
+    buf.write(r.DIM)  # what __init__ does when think_open
+    r.feed("step one, step two")
+    r.feed("</think>\n\nThe answer is 4.")
+    r.finish()
+    out = buf.getvalue()
+    assert out.startswith("\x1b[2m")
+    assert "step one" in out and "</think>" not in out
+    assert out.endswith("The answer is 4.")
+
+
+def test_stream_reasoning_tag_split_across_chunks():
+    r, buf = renderer()
+    r.reasoning, r._rbuf = True, ""
+    r.feed("hmm</thi")
+    r.feed("nk>\nanswer")
+    r.finish()
+    out = buf.getvalue()
+    assert "</think>" not in out and out.endswith("answer")
+
+
+def test_stream_reasoning_never_closes_resets():
+    r, buf = renderer()
+    r.reasoning, r._rbuf = True, ""
+    r.feed("endless pondering")
+    r.finish()
+    assert buf.getvalue().endswith("\x1b[0m")

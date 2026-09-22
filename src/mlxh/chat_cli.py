@@ -17,13 +17,15 @@ from .toolcalls import load_user_tools, parse_tool_calls, run_tool
 MAX_TOOL_ROUNDS = 5
 
 
-def generate_once(runner, messages, images, max_tokens, specs):
+def generate_once(runner, messages, images, max_tokens, specs, thinking=None):
     """One generation pass; streams visible text, hides tool-call XML."""
-    prompt = runner.template(messages, num_images=len(images), tools=specs)
+    prompt = runner.template(messages, num_images=len(images), tools=specs,
+                             thinking=thinking)
+    think_open = isinstance(prompt, str) and prompt.rstrip().endswith("<think>")
     parts, printed = [], 0
     marker = "<tool_call>"
     last = None
-    rend = ui.StreamRenderer()
+    rend = ui.StreamRenderer(think_open=think_open)
     for resp in runner.stream(prompt, images=images, max_tokens=max_tokens):
         parts.append(resp.text)
         full = "".join(parts)
@@ -43,12 +45,13 @@ def generate_once(runner, messages, images, max_tokens, specs):
     return full, last
 
 
-def ask(runner, messages, images, max_tokens, tools=None):
+def ask(runner, messages, images, max_tokens, tools=None, thinking=None):
     """tools: (registry, specs) to enable the agent loop, or None."""
     registry, specs = tools if tools else ({}, None)
     total_tokens, tps = 0, 0.0
     for _ in range(MAX_TOOL_ROUNDS):
-        text, last = generate_once(runner, messages, images, max_tokens, specs)
+        text, last = generate_once(runner, messages, images, max_tokens, specs,
+                                   thinking=thinking)
         total_tokens += last.generation_tokens
         tps = last.generation_tps
         content, tool_calls = parse_tool_calls(text)
@@ -85,7 +88,12 @@ def main():
     ap.add_argument("--tools", action="store_true",
                     help="enable built-in tools (weather, time, calculator)")
     ap.add_argument("--no-tools", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--thinking", action="store_true",
+                    help="ask the model to reason before answering (shown dimmed)")
+    ap.add_argument("--no-thinking", action="store_true",
+                    help="ask the model to skip reasoning")
     args = ap.parse_args()
+    thinking = True if args.thinking else (False if args.no_thinking else None)
 
     print(f"Loading {Path(args.model_path).name}...", file=sys.stderr)
     try:
@@ -109,7 +117,7 @@ def main():
 
     if args.prompt:
         messages = [{"role": "user", "content": args.prompt}]
-        ask(runner, messages, args.image, args.max_tokens, tools)
+        ask(runner, messages, args.image, args.max_tokens, tools, thinking=thinking)
         return
 
     prompt_ansi = False
@@ -193,7 +201,7 @@ def main():
             continue
         history.append({"role": "user", "content": user})
         print()
-        ask(runner, history, staged, args.max_tokens, tools)
+        ask(runner, history, staged, args.max_tokens, tools, thinking=thinking)
         staged = []
 
 
