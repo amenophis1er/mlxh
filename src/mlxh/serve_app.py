@@ -202,9 +202,22 @@ def anthropic_messages(body: dict):
     if body.get("stream"):
         def sse():
             ev = anth.sse_event
-            parts, last, started, text_open, printed = [], None, False, False, 0
+            parts, last, text_open, printed = [], None, False, 0
+            # Emit message_start immediately and ping while the model chews on
+            # the prompt: a silent connection during a long prompt-processing
+            # phase makes agent clients assume the network died and retry,
+            # piling duplicate jobs onto the queue.
+            yield ev("message_start", {"type": "message_start", "message": {
+                "id": msg_id, "type": "message", "role": "assistant",
+                "model": MODEL_ID, "content": [], "stop_reason": None,
+                "stop_sequence": None,
+                "usage": {"input_tokens": 0, "output_tokens": 0}}})
             while True:
-                item = chunks.get()
+                try:
+                    item = chunks.get(timeout=15)
+                except queue.Empty:
+                    yield ev("ping", {"type": "ping"})
+                    continue
                 if item is None:
                     break
                 if isinstance(item, BaseException):
@@ -212,13 +225,6 @@ def anthropic_messages(body: dict):
                         "type": "api_error", "message": str(item)}})
                     return
                 last = item
-                if not started:
-                    yield ev("message_start", {"type": "message_start", "message": {
-                        "id": msg_id, "type": "message", "role": "assistant",
-                        "model": MODEL_ID, "content": [], "stop_reason": None,
-                        "stop_sequence": None,
-                        "usage": {"input_tokens": item.prompt_tokens, "output_tokens": 0}}})
-                    started = True
                 parts.append(item.text)
                 full = "".join(parts)
                 cut = full.find(MARKER)
@@ -261,11 +267,11 @@ def anthropic_messages(body: dict):
                 yield ev("content_block_stop", {"type": "content_block_stop", "index": index})
                 index += 1
             finish = last.finish_reason if last else "stop"
-            out_tokens = last.generation_tokens if last else 0
             yield ev("message_delta", {"type": "message_delta",
                                        "delta": {"stop_reason": anth.stop_reason(tool_calls, finish),
                                                  "stop_sequence": None},
-                                       "usage": {"output_tokens": out_tokens}})
+                                       "usage": {"input_tokens": last.prompt_tokens if last else 0,
+                                                 "output_tokens": last.generation_tokens if last else 0}})
             yield ev("message_stop", {"type": "message_stop"})
 
         return StreamingResponse(sse(), media_type="text/event-stream")
@@ -343,7 +349,11 @@ def chat_completions(body: dict):
             last = None
             parts = []
             while True:
-                item = chunks.get()
+                try:
+                    item = chunks.get(timeout=15)
+                except queue.Empty:
+                    yield ": ping\n\n"
+                    continue
                 if item is None:
                     break
                 if isinstance(item, BaseException):
