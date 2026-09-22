@@ -124,7 +124,13 @@ def main():
             pass
         readline.set_history_length(500)
         atexit.register(lambda: readline.write_history_file(hist))
-        prompt_ansi = sys.stdin.isatty() and sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+        # The \001/\002 non-printing markers are GNU-readline-only; under
+        # macOS libedit they corrupt input accounting and drop keystrokes
+        # (e.g. "/exit" arriving as "/ext"), so colorize the prompt only on
+        # real GNU readline.
+        is_gnu = "libedit" not in (readline.__doc__ or "")
+        prompt_ansi = (is_gnu and sys.stdin.isatty() and sys.stdout.isatty()
+                       and not os.environ.get("NO_COLOR"))
     except ImportError:
         pass
 
