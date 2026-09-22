@@ -115,14 +115,23 @@ def cmd_search(args):
     from huggingface_hub import HfApi
     results = list(HfApi().list_models(
         search=args.query, filter="mlx", sort="downloads", limit=args.limit,
-        expand=["downloads", "lastModified"],
+        expand=["downloads", "lastModified", "safetensors"],
     ))
     if not results:
         print(f"no MLX models match '{args.query}' — try https://huggingface.co/models?library=mlx")
         return
+
+    def params_of(m):
+        st = getattr(m, "safetensors", None)
+        if not st or not st.total:
+            return "-"
+        n = st.total
+        return f"{n / 1e9:.1f}B" if n >= 1e9 else f"{n / 1e6:.0f}M"
+
+    print(f"{'REPO':56} {'PARAMS':>7} {'DOWNLOADS':>10}  UPDATED")
     for m in results:
-        updated = m.last_modified.strftime("%Y-%m-%d") if m.last_modified else ""
-        print(f"{m.id:56} {m.downloads or 0:>9} dl  {updated}")
+        updated = m.last_modified.strftime("%Y-%m-%d") if m.last_modified else "-"
+        print(f"{m.id:56} {params_of(m):>7} {m.downloads or 0:>10,}  {updated}")
     print(f"\ninstall one with: mlxh pull <repo-id>")
 
 
