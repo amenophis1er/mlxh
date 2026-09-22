@@ -80,12 +80,24 @@ def load_runner(model_dir):
         model, _ = load_model(model_dir)
         return TextRunner(model, load_tokenizer(model_dir))
 
+    def _short(e, n=180):
+        s = " ".join(str(e).split())
+        return s[:n] + ("…" if len(s) > n else "")
+
     try:
         from mlx_vlm import load as vlm_load
         from mlx_vlm.utils import load_config
         model, processor = vlm_load(str(model_dir))
         return VLMRunner(model, processor, load_config(str(model_dir)))
-    except Exception:
-        from mlx_lm import load as lm_load
-        model, tokenizer = lm_load(str(model_dir))
-        return TextRunner(model, tokenizer)
+    except Exception as vlm_err:
+        try:
+            from mlx_lm import load as lm_load
+            model, tokenizer = lm_load(str(model_dir))
+            return TextRunner(model, tokenizer)
+        except Exception as lm_err:
+            raise RuntimeError(
+                f"cannot load '{model_dir.name}' with the installed MLX stack\n"
+                f"  mlx-vlm: {_short(vlm_err)}\n"
+                f"  mlx-lm:  {_short(lm_err)}\n"
+                f"  -> the model may need a newer mlx-vlm/mlx-lm; try updating mlxh"
+            ) from None

@@ -6,6 +6,7 @@ Invoked by `mlxh serve <model>`; can also run standalone:
 
 import argparse
 import base64
+import os
 import binascii
 import json
 import queue
@@ -52,7 +53,11 @@ def gen_worker(model_path):
         print(f"[mlx] cache limit {SETTINGS['cache_limit_gb']} GB", flush=True)
     print(f"Loading {MODEL_ID} from {model_path}...", flush=True)
     t0 = time.perf_counter()
-    runner = load_runner(model_path)
+    try:
+        runner = load_runner(model_path)
+    except RuntimeError as e:
+        print(e, flush=True)
+        os._exit(1)
     print(f"Ready in {time.perf_counter() - t0:.1f}s "
           f"(images: {'yes' if runner.supports_images else 'no'})", flush=True)
     ready.set()

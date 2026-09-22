@@ -82,7 +82,10 @@ def main():
     args = ap.parse_args()
 
     print(f"Loading {Path(args.model_path).name}...", file=sys.stderr)
-    runner = load_runner(args.model_path)
+    try:
+        runner = load_runner(args.model_path)
+    except RuntimeError as e:
+        sys.exit(str(e))
     if args.image and not runner.supports_images:
         sys.exit("this model does not support images")
     tools = not args.no_tools
