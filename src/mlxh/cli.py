@@ -447,6 +447,10 @@ def cmd_launch(args):
             args.dry_run = True
             i += 1
             continue
+        if a == "--no-mcp":
+            args.no_mcp = True
+            i += 1
+            continue
         cleaned.append(a)
         i += 1
     args.rest = cleaned
@@ -455,6 +459,12 @@ def cmd_launch(args):
     path = resolve(cfg, name)
     port = args.port or cfg["port"]
     env_extra, agent_args = AGENTS[args.agent](port, name)
+    if args.no_mcp:
+        if args.agent != "claude":
+            ui.fail("--no-mcp only applies to claude")
+        # strip MCP tool definitions: they add tens of thousands of prompt
+        # tokens that local models can't afford
+        agent_args += ["--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}']
 
     def server_up():
         try:
@@ -508,10 +518,11 @@ def cmd_launch(args):
         ui.fail(f"'{args.agent}' is not installed",
                 hint="install it first, or use --dry-run to see the wiring")
     cap = cfg["max_prompt_tokens"]
-    if cap and cap < 32768:
-        ui.note(f"note: coding agents send ~30k-token prompts; max_prompt_tokens={cap} "
-                f"will reject them. Raise with `mlxh config max_prompt_tokens 40960` — "
-                f"large contexts need real memory headroom (KV cache grows with tokens).")
+    if cap and cap < 32768 and not args.no_mcp:
+        ui.note(f"note: coding agents send ~30k-token prompts (more with MCP servers); "
+                f"max_prompt_tokens={cap} will reject them. Raise with "
+                f"`mlxh config max_prompt_tokens 40960`, or shrink the prompt with "
+                f"`--no-mcp` (claude only).")
     ui.step(f"launching {args.agent} against {name}")
     try:
         proc = subprocess.run([args.agent, *agent_args, *args.rest],
@@ -631,6 +642,8 @@ def main():
     p.add_argument("--model")
     p.add_argument("--port", type=int)
     p.add_argument("--dry-run", action="store_true", help="print env + command instead of running")
+    p.add_argument("--no-mcp", action="store_true",
+                   help="claude: launch without MCP servers (much smaller prompts)")
     p.add_argument("rest", nargs=argparse.REMAINDER)
     p.set_defaults(fn=cmd_launch)
 
