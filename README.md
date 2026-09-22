@@ -54,7 +54,8 @@ mlxh chat bonsai2 -- --tools             # with your tools from ~/.mlxh/tools.py
 mlxh chat bonsai2 -- -p "one question"   # one-shot (args after the name pass through)
 mlxh chat bonsai2 -- --thinking          # show model reasoning, dimmed (--no-thinking skips it)
 
-mlxh serve bonsai2                       # OpenAI-compatible API at :1060/v1
+mlxh serve bonsai2                       # OpenAI + Anthropic API at :1060
+mlxh launch claude --model gemma4-12b --no-mcp   # run Claude Code on a local model
 mlxh config port 1234                    # persistent defaults
 
 mlxh mv gemma-4-E4B-it-MLX-4bit gemma4   # rename to a nicer alias
@@ -100,6 +101,37 @@ The API supports `/v1/chat/completions` (streaming + non-streaming),
 via `image_url` parts (base64 data URLs or local paths). Point any OpenAI
 client at `http://localhost:1060/v1` (the default port: MLX is the Roman
 numeral for 1060) with any API key.
+
+The server also speaks the **Anthropic Messages API** (`/v1/messages`,
+streaming with keepalive pings, tool use, images, `count_tokens`), which is
+what Claude Code uses. `GET /mlxh/info` reports the live settings of a
+running server.
+
+## Coding agents
+
+```bash
+mlxh launch claude --model gemma4-12b --no-mcp
+mlxh launch codex --model gemma4-12b
+mlxh launch claude --dry-run             # print the env + command instead
+```
+
+`launch` starts a server if none is running (and stops it again when the
+agent exits), wires the agent's environment (`ANTHROPIC_BASE_URL` /
+`OPENAI_BASE_URL`), and runs it. Anything after `--` passes through to the
+agent.
+
+Practical notes:
+
+- Coding agents send very large prompts. `--no-mcp` (claude only) launches
+  without MCP servers, cutting the prompt from ~50k to ~16k tokens — start
+  there. For full-MCP sessions, raise `max_prompt_tokens` accordingly and
+  make sure the model + context fits your memory.
+- The prompt cache makes follow-up turns fast; the first turn still pays
+  full prompt processing (~40s on a 12B for Claude Code's core prompt).
+- If the local model errors, Claude Code may silently fall back to a real
+  Anthropic model on your account — watch for its "Switched to …" notice.
+- Model advice: a 12B-class stock model works well; heavily-compressed
+  large models (Bonsai) are slow at agent-scale contexts.
 
 ## Chat tools
 
