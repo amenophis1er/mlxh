@@ -6,9 +6,11 @@ Invoked by `mlxh chat <model>`; also standalone:
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
+from . import ui
 from .loader import load_runner
 from .toolcalls import TOOL_REGISTRY, TOOL_SPECS, parse_tool_calls, run_tool
 
@@ -23,6 +25,7 @@ def generate_once(runner, messages, images, max_tokens, tools):
     parts, printed = [], 0
     marker = "<tool_call>"
     last = None
+    rend = ui.StreamRenderer()
     for resp in runner.stream(prompt, images=images, max_tokens=max_tokens):
         parts.append(resp.text)
         full = "".join(parts)
@@ -30,14 +33,15 @@ def generate_once(runner, messages, images, max_tokens, tools):
         # hold back a tag-length tail so a half-arrived "<tool_ca" never prints
         visible = full[:cut] if cut != -1 else full[: max(0, len(full) - len(marker))]
         if len(visible) > printed:
-            print(visible[printed:], end="", flush=True)
+            rend.feed(visible[printed:])
             printed = len(visible)
         last = resp
     full = "".join(parts)
     cut = full.find(marker)
     visible = full[:cut] if cut != -1 else full
     if len(visible) > printed:
-        print(visible[printed:], end="", flush=True)
+        rend.feed(visible[printed:])
+    rend.finish()
     return full, last
 
 
@@ -49,7 +53,7 @@ def ask(runner, messages, images, max_tokens, tools=True):
         tps = last.generation_tps
         content, tool_calls = parse_tool_calls(text)
         if not tool_calls:
-            print(f"\n\n[{total_tokens} tokens @ {tps:.1f} tok/s]")
+            print("\n\n" + ui.dim(f"[{total_tokens} tokens @ {tps:.1f} tok/s]"))
             messages.append({"role": "assistant", "content": content})
             return content
         messages.append({
@@ -64,8 +68,8 @@ def ask(runner, messages, images, max_tokens, tools=True):
             name = tc["function"]["name"]
             args = json.loads(tc["function"]["arguments"])
             result = run_tool(name, args)
-            print(f"\n[tool] {name}({json.dumps(args, ensure_ascii=False)}) -> "
-                  f"{json.dumps(result, ensure_ascii=False)}", file=sys.stderr)
+            print("\n" + ui.dim(f"[tool] {name}({json.dumps(args, ensure_ascii=False)}) -> "
+                  f"{json.dumps(result, ensure_ascii=False)}", sys.stderr), file=sys.stderr)
             messages.append({"role": "tool", "content": json.dumps(result)})
         images = []  # images only accompany the first pass
     print("\n(stopped: too many tool rounds)", file=sys.stderr)
@@ -102,14 +106,35 @@ def main():
         ask(runner, messages, args.image, args.max_tokens, tools)
         return
 
-    hint = "/image <path> attaches an image to your next message,\n" if runner.supports_images else ""
-    print(f"Interactive chat. {hint}/reset clears history, /exit quits (Ctrl-D too).",
+    prompt_ansi = False
+    try:
+        import atexit
+        import readline
+        hist = Path(os.environ.get("MLXH_HOME", Path.home() / ".mlxh")) / "chat_history"
+        hist.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            readline.read_history_file(hist)
+        except OSError:
+            pass
+        readline.set_history_length(500)
+        atexit.register(lambda: readline.write_history_file(hist))
+        prompt_ansi = sys.stdin.isatty() and sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+    except ImportError:
+        pass
+
+    hint = "/image <path> attaches an image, " if runner.supports_images else ""
+    print(f"Interactive chat. {hint}/reset clears history, /exit quits, /help lists commands.",
           file=sys.stderr)
     history, staged = [], []
     while True:
         tag = f" [{len(staged)} img]" if staged else ""
+        if prompt_ansi:
+            # \001/\002 tell readline the ANSI codes take no screen width
+            prompt = f"\n\001\x1b[1;36m\002you{tag}>\001\x1b[0m\002 "
+        else:
+            prompt = f"\nyou{tag}> "
         try:
-            user = input(f"\nyou{tag}> ").strip()
+            user = input(prompt).strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
@@ -117,6 +142,11 @@ def main():
             continue
         if user in ("/exit", "/bye", "/quit"):
             break
+        if user == "/help":
+            print("/image <path>  attach an image to your next message\n"
+                  "/reset         clear conversation history\n"
+                  "/exit          quit (also /bye, /quit, Ctrl-D)", file=sys.stderr)
+            continue
         if user == "/reset":
             history, staged = [], []
             print("(history cleared)", file=sys.stderr)

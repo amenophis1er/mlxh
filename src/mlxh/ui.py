@@ -124,3 +124,99 @@ def _select_numbered(title, options):
         if choice in options:
             return options.index(choice)
         print(dim(f"enter 1-{len(options)} or a name"))
+
+
+class StreamRenderer:
+    """Stream model output with lightweight markdown styling.
+
+    Handles **bold**, `inline code` (cyan), ``` fenced blocks (dim), and
+    # headings (bold) — statefully, so markers split across chunks still
+    work. Plain pass-through when the stream isn't a color TTY.
+    """
+
+    BOLD, UNBOLD = "\x1b[1m", "\x1b[22m"
+    CODE, UNCODE = "\x1b[36m", "\x1b[39m"
+    DIM, UNDIM = "\x1b[2m", "\x1b[22m"
+
+    def __init__(self, out=None):
+        self.out = out or sys.stdout
+        self.enabled = _colors_on(self.out)
+        self.carry = ""
+        self.bold = self.code = self.fence = self.heading = False
+        self.line_start = True
+
+    def feed(self, text):
+        if not self.enabled:
+            self.out.write(text)
+            self.out.flush()
+            return
+        buf, self.carry = self.carry + text, ""
+        self._process(buf, final=False)
+
+    def finish(self):
+        if not self.enabled:
+            return
+        if self.carry:
+            buf, self.carry = self.carry, ""
+            self._process(buf, final=True)
+        if self.bold or self.code or self.fence or self.heading:
+            self.out.write("\x1b[0m")
+        self.out.flush()
+
+    def _process(self, buf, final):
+        w = self.out.write
+        i, n = 0, len(buf)
+        while i < n:
+            ch = buf[i]
+            if ch in "*`":
+                j = i
+                while j < n and buf[j] == ch:
+                    j += 1
+                run = j - i
+                need = 2 if ch == "*" else 3
+                if j == n and not final and run < need:
+                    self.carry = buf[i:]
+                    break
+                if ch == "*" and not self.fence:
+                    while run >= 2:
+                        self.bold = not self.bold
+                        w(self.BOLD if self.bold else self.UNBOLD)
+                        run -= 2
+                    if run:
+                        w("*")
+                        self.line_start = False
+                elif ch == "`" and run >= 3 and self.line_start:
+                    if not self.fence:
+                        self.fence = True
+                        w(self.DIM + "`" * run)
+                    else:
+                        w("`" * run + self.UNDIM)
+                        self.fence = False
+                    self.line_start = False
+                elif ch == "`" and run == 1 and not self.fence:
+                    self.code = not self.code
+                    w(self.CODE if self.code else self.UNCODE)
+                else:
+                    w(ch * run)
+                    self.line_start = False
+                i = j
+                continue
+            if ch == "\n":
+                if self.heading:
+                    w(self.UNBOLD)
+                    self.heading = False
+                w("\n")
+                self.line_start = True
+                i += 1
+                continue
+            if ch == "#" and self.line_start and not self.fence:
+                self.heading = True
+                w(self.BOLD + "#")
+                self.line_start = False
+                i += 1
+                continue
+            w(ch)
+            if ch not in " \t":
+                self.line_start = False
+            i += 1
+        self.out.flush()
