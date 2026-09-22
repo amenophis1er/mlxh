@@ -285,12 +285,23 @@ def cmd_list(_args):
         rows.append((name, "linked" if path.is_symlink() else "pulled",
                      f"{n / 1e9:.1f} GB", source_of(path),
                      str(path.resolve()) if path.is_symlink() else ""))
-    nw = max(len(r[0]) for r in rows)
-    sw = max(len(r[3]) for r in rows)
+    nw = max(len("NAME"), max(len(r[0]) for r in rows))
+    sw = max(len("SOURCE"), max(len(r[3]) for r in rows))
+    cols = shutil.get_terminal_size().columns if sys.stdout.isatty() else 10**9
+    print(ui.dim(f"{'NAME':{nw}}  {'KIND':6} {'SIZE':>8}  SOURCE"))
+    home = str(Path.home())
     for name, kind, size, source, target in rows:
         line = f"{name:{nw}}  {kind:6} {size:>8}  {source:{sw}}"
         if target:
-            line += f"  -> {target}"
+            if target.startswith(home):
+                target = "~" + target[len(home):]
+            if len(line) + len(target) + 5 <= cols:
+                line += f"  -> {target}"
+            else:
+                # keep the row intact; the link target gets its own line
+                print(line.rstrip())
+                print(ui.dim(f"{'':{nw}}  -> {target}"))
+                continue
         print(line.rstrip())
 
 
