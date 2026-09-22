@@ -603,6 +603,51 @@ def cmd_config(args):
     ui.ok(f"{args.key} = {cfg[args.key]}")
 
 
+AGENT_MENU = [
+    ("Launch Claude Code", "claude", "Anthropic's coding agent (core tools, no MCP)"),
+    ("Launch Codex", "codex", "OpenAI's coding agent"),
+    ("Launch pi", "pi", "pi coding agent"),
+]
+
+
+def cmd_home(parser):
+    """Bare `mlxh`: an interactive home menu instead of an argparse error."""
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        parser.print_help()
+        return
+    import shutil as _shutil
+    from types import SimpleNamespace as NS
+
+    from . import __version__
+    print(ui.bold(f"mlxh {__version__}"))
+    labels, notes, actions = [], [], []
+    for label, agent, note in AGENT_MENU:
+        installed = _shutil.which(agent)
+        labels.append(label)
+        notes.append(note if installed else f"{note} — not installed")
+        actions.append(("launch", agent))
+    labels += ["Chat", "Serve", "List models"]
+    notes += ["talk to a model in this terminal",
+              "OpenAI + Anthropic API server",
+              "what's installed, sizes, sources"]
+    actions += [("chat", None), ("serve", None), ("list", None)]
+
+    idx = ui.select("what do you want to do?  (↑/↓ + enter, q quits)", labels, notes)
+    kind, agent = actions[idx]
+    if kind == "launch":
+        cmd_launch(NS(agent=agent, model=None, port=None, dry_run=False,
+                      no_mcp=(agent == "claude"), rest=[]))
+    elif kind == "chat":
+        cmd_chat(NS(name=None, rest=[]))
+    elif kind == "list":
+        cmd_list(None)
+    else:
+        cmd_serve(NS(name=None, port=None, host=None, max_queued=None,
+                     max_tokens_cap=None, memory_limit_gb=None,
+                     cache_limit_gb=None, gen_timeout_s=None,
+                     max_prompt_tokens=None, prompt_cache=None, thinking=None))
+
+
 def cmd_uninstall(args):
     cfg = load_config()
     root = models_dir(cfg)
@@ -626,7 +671,7 @@ def cmd_uninstall(args):
 def main():
     ap = argparse.ArgumentParser(prog="mlxh", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub = ap.add_subparsers(dest="cmd", required=False)
 
     p = sub.add_parser("search", help="search Hugging Face for MLX models")
     p.add_argument("query")
@@ -705,7 +750,10 @@ def main():
 
     args = ap.parse_args()
     try:
-        args.fn(args)
+        if args.cmd is None:
+            cmd_home(ap)
+        else:
+            args.fn(args)
     except KeyboardInterrupt:
         print()
         sys.exit(130)

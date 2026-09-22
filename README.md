@@ -42,6 +42,9 @@ updates the app code in place (models and config are untouched).
 
 ## Use
 
+Running bare `mlxh` opens an interactive home menu: launch a coding agent,
+chat, serve, or list models — arrow keys and enter.
+
 ```bash
 mlxh run mlx-community/Qwen2.5-0.5B-Instruct-4bit   # pull if needed, chat right away
 mlxh search qwen3                        # find MLX models on Hugging Face

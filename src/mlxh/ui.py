@@ -50,10 +50,12 @@ def select(title, options, annotations=None):
     when raw terminal mode isn't available.
     """
     annotations = annotations or [""] * len(options)
+    width = max(len(o) for o in options)
 
     def line(i, selected):
         mark = _c("36", "❯", sys.stdout) if selected else " "
-        name = bold(options[i]) if selected else options[i]
+        padded = options[i].ljust(width)
+        name = bold(padded) if selected else padded
         note = ("  " + dim(annotations[i])) if annotations[i] else ""
         return f"{mark} {name}{note}"
 
