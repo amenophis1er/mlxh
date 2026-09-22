@@ -24,7 +24,13 @@ from toolcalls import parse_tool_calls
 app = FastAPI(title="mlxh")
 runner = None
 MODEL_ID = "model"
-MAX_QUEUED = 4  # pending generations beyond the active one; more get a 503
+SETTINGS = {
+    "max_queued": 4,       # pending generations beyond the active one; more get a 503
+    "max_tokens_cap": 16384,  # server-side ceiling on requested max_tokens; 0 = off
+    "memory_limit_gb": 0.0,   # MLX unified-memory limit; 0 = off
+    "cache_limit_gb": 0.0,    # MLX buffer-cache limit; 0 = off
+    "gen_timeout_s": 600,     # hard stop for one generation; 0 = off
+}
 
 # All MLX work (model load AND generation) happens on one dedicated thread —
 # MLX streams are per-thread state, so generating from FastAPI's threadpool
@@ -37,18 +43,30 @@ ready = threading.Event()
 
 def gen_worker(model_path):
     global runner
+    import mlx.core as mx
+    if SETTINGS["memory_limit_gb"] > 0:
+        mx.set_memory_limit(int(SETTINGS["memory_limit_gb"] * 1e9))
+        print(f"[mlx] memory limit {SETTINGS['memory_limit_gb']} GB", flush=True)
+    if SETTINGS["cache_limit_gb"] > 0:
+        mx.set_cache_limit(int(SETTINGS["cache_limit_gb"] * 1e9))
+        print(f"[mlx] cache limit {SETTINGS['cache_limit_gb']} GB", flush=True)
     print(f"Loading {MODEL_ID} from {model_path}...", flush=True)
     t0 = time.perf_counter()
     runner = load_runner(model_path)
     print(f"Ready in {time.perf_counter() - t0:.1f}s "
           f"(images: {'yes' if runner.supports_images else 'no'})", flush=True)
     ready.set()
+    timeout = SETTINGS["gen_timeout_s"]
     while True:
         job = jobs.get()
         out = job["out"]
         try:
+            t0 = time.perf_counter()
             for resp in run_generation(job["body"]):
                 out.put(resp)
+                if timeout and time.perf_counter() - t0 > timeout:
+                    print(f"[gen] timeout after {timeout}s, stopping", flush=True)
+                    break
             out.put(None)
         except BaseException as e:
             out.put(e)
@@ -58,7 +76,7 @@ def submit(body):
     """Queue a generation; returns the queue its chunks arrive on."""
     if not ready.wait(timeout=300):
         raise HTTPException(503, "model is still loading")
-    if jobs.qsize() >= MAX_QUEUED:
+    if jobs.qsize() >= SETTINGS["max_queued"]:
         raise HTTPException(503, "Server busy: too many queued generations")
     out = queue.Queue()
     jobs.put({"body": body, "out": out})
@@ -117,6 +135,8 @@ def run_generation(body):
     """Yield generation chunks. Runs only on the gen_worker thread."""
     messages, images, tmp_files = extract_messages(body.get("messages", []))
     max_tokens = body.get("max_tokens") or body.get("max_completion_tokens") or 1024
+    if SETTINGS["max_tokens_cap"]:
+        max_tokens = min(max_tokens, SETTINGS["max_tokens_cap"])
     tools = body.get("tools") or None
     prompt = runner.template(messages, num_images=len(images), tools=tools)
     print(f"[gen] start: {len(messages)} msgs, {len(images)} images, "
@@ -244,7 +264,17 @@ def main():
     ap.add_argument("--name", default=None)
     ap.add_argument("--port", type=int, default=8081)
     ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--max-queued", type=int, default=SETTINGS["max_queued"])
+    ap.add_argument("--max-tokens-cap", type=int, default=SETTINGS["max_tokens_cap"])
+    ap.add_argument("--memory-limit-gb", type=float, default=SETTINGS["memory_limit_gb"])
+    ap.add_argument("--cache-limit-gb", type=float, default=SETTINGS["cache_limit_gb"])
+    ap.add_argument("--gen-timeout-s", type=int, default=SETTINGS["gen_timeout_s"])
     args = ap.parse_args()
+    SETTINGS.update(
+        max_queued=args.max_queued, max_tokens_cap=args.max_tokens_cap,
+        memory_limit_gb=args.memory_limit_gb, cache_limit_gb=args.cache_limit_gb,
+        gen_timeout_s=args.gen_timeout_s,
+    )
     MODEL_ID = args.name or Path(args.model_path).name
     threading.Thread(target=gen_worker, args=(args.model_path,), daemon=True).start()
     import uvicorn
