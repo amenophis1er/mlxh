@@ -39,6 +39,7 @@ updates the app code in place (models and config are untouched).
 ## Use
 
 ```bash
+mlxh search qwen3                        # find MLX models on Hugging Face
 mlxh pull prism-ml/Ternary-Bonsai-2-27B-mlx-2bit --name bonsai2   # download
 mlxh link ~/some/existing/model --name mymodel                    # or symlink one in
 mlxh list

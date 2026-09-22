@@ -91,6 +91,21 @@ def resolve(cfg, name):
     return str(path)
 
 
+def cmd_search(args):
+    from huggingface_hub import HfApi
+    results = list(HfApi().list_models(
+        search=args.query, filter="mlx", sort="downloads", limit=args.limit,
+        expand=["downloads", "lastModified"],
+    ))
+    if not results:
+        print(f"no MLX models match '{args.query}' — try https://huggingface.co/models?library=mlx")
+        return
+    for m in results:
+        updated = m.last_modified.strftime("%Y-%m-%d") if m.last_modified else ""
+        print(f"{m.id:56} {m.downloads or 0:>9} dl  {updated}")
+    print(f"\ninstall one with: mlxh pull <repo-id>")
+
+
 def cmd_pull(args):
     cfg = load_config()
     name = args.name or args.repo.split("/")[-1]
@@ -215,6 +230,11 @@ def main():
     ap = argparse.ArgumentParser(prog="mlxh", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("search", help="search Hugging Face for MLX models")
+    p.add_argument("query")
+    p.add_argument("--limit", type=int, default=10)
+    p.set_defaults(fn=cmd_search)
 
     p = sub.add_parser("pull", help="download a model from Hugging Face")
     p.add_argument("repo")
