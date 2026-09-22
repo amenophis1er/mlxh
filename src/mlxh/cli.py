@@ -35,6 +35,8 @@ import shutil
 import sys
 from pathlib import Path
 
+from . import ui
+
 HOME = Path(os.environ.get("MLXH_HOME", Path.home() / ".mlxh"))
 CONFIG = HOME / "config.json"
 DEFAULTS = {
@@ -107,7 +109,10 @@ def resolve(cfg, name):
     path = models_dir(cfg) / name
     if not is_model(path):
         names = ", ".join(discover(cfg)) or "(none)"
-        sys.exit(f"no model '{name}' in {models_dir(cfg)}. Available: {names}")
+        ui.fail(f"no model named '{name}'",
+                f"models dir: {models_dir(cfg)}",
+                f"available:  {names}",
+                hint="mlxh pull <hf-repo> downloads one; mlxh search <query> finds them")
     return str(path)
 
 
@@ -121,7 +126,8 @@ def cmd_search(args):
         expand=["downloads", "lastModified", "safetensors"],
     ))
     if not results:
-        print(f"no MLX models match '{args.query}' — try https://huggingface.co/models?library=mlx")
+        print(f"no MLX models match '{args.query}'")
+        ui.note("try https://huggingface.co/models?library=mlx")
         return
 
     def size_of(repo_id):
@@ -143,11 +149,12 @@ def cmd_search(args):
         n = st.total
         return f"{n / 1e9:.1f}B" if n >= 1e9 else f"{n / 1e6:.0f}M"
 
-    print(f"{'REPO':56} {'PARAMS':>7} {'SIZE':>8} {'DOWNLOADS':>10}  UPDATED")
+    print(ui.dim(f"{'REPO':56} {'PARAMS':>7} {'SIZE':>8} {'DOWNLOADS':>10}  UPDATED"))
     for m, size in zip(results, sizes):
         updated = m.last_modified.strftime("%Y-%m-%d") if m.last_modified else "-"
         print(f"{m.id:56} {params_of(m):>7} {size:>8} {m.downloads or 0:>10,}  {updated}")
-    print(f"\ninstall one with: mlxh pull <repo-id>")
+    print()
+    ui.note("install one with: mlxh pull <repo-id>")
 
 
 def total_ram_bytes():
@@ -166,7 +173,9 @@ def cmd_pull(args):
     name = args.name or args.repo.split("/")[-1]
     dest = models_dir(cfg) / name
     if dest.exists():
-        sys.exit(f"'{name}' already exists ({dest}); pick --name or `mlxh rm {name}` first")
+        ui.fail(f"'{name}' already exists",
+                f"at {dest}",
+                hint=f"pick another with --name, or `mlxh rm {name}` first")
     dest.parent.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("HF_HOME", str(HOME / "hf-cache"))
     from datetime import datetime, timezone
@@ -180,21 +189,24 @@ def cmd_pull(args):
     if size:
         free = shutil.disk_usage(dest.parent).free
         if size + 2e9 > free:  # keep a 2 GB margin
-            sys.exit(f"refusing: {args.repo} is {size / 1e9:.1f} GB but only "
-                     f"{free / 1e9:.1f} GB free on {dest.parent}")
+            ui.fail(f"{args.repo} does not fit on disk",
+                    f"download size  {size / 1e9:8.1f} GB",
+                    f"free space     {free / 1e9:8.1f} GB  ({dest.parent})")
         ram = total_ram_bytes()
         if ram and size > 0.9 * ram and not args.force:
-            sys.exit(f"refusing: {args.repo} is {size / 1e9:.1f} GB of weights but this "
-                     f"machine has {ram / 1e9:.0f} GB unified memory — it won't load. "
-                     f"Use --force to download anyway (e.g. for another machine).")
+            ui.fail(f"{args.repo} won't load on this machine",
+                    f"model weights  {size / 1e9:8.1f} GB",
+                    f"unified memory {ram / 1e9:8.0f} GB",
+                    hint="--force downloads anyway (e.g. for another machine)")
 
-    print(f"Downloading {args.repo}{f' ({size / 1e9:.1f} GB)' if size else ''} -> {dest}")
+    ui.step(f"downloading {args.repo}{f' ({size / 1e9:.1f} GB)' if size else ''}")
     try:
         snapshot_download(args.repo, local_dir=str(dest))
     except Exception as e:
         shutil.rmtree(dest, ignore_errors=True)
-        sys.exit(f"download failed: {type(e).__name__}: {e}\n"
-                 f"(check the repo id with `mlxh search`; gated repos need `hf auth login`)")
+        ui.fail("download failed",
+                f"{type(e).__name__}: {e}",
+                hint="check the repo id with `mlxh search`; gated repos need `hf auth login`")
     try:
         revision = HfApi().model_info(args.repo).sha or ""
     except Exception:
@@ -204,7 +216,8 @@ def cmd_pull(args):
         "revision": revision,
         "pulled_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }, indent=2))
-    print(f"Done ({args.repo}@{revision[:7]}). Try: mlxh chat {name}")
+    ui.ok(f"pulled {args.repo}@{revision[:7]} as '{name}'")
+    ui.note(f"chat: mlxh chat {name}    serve: mlxh serve {name}")
 
 
 def cmd_link(args):
@@ -215,17 +228,19 @@ def cmd_link(args):
     name = args.name or target.name
     dest = models_dir(cfg) / name
     if dest.exists() or dest.is_symlink():
-        sys.exit(f"'{name}' already exists ({dest})")
+        ui.fail(f"'{name}' already exists", f"at {dest}")
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.symlink_to(target)
-    print(f"Linked '{name}' -> {target} (`mlxh rm {name}` removes only the link)")
+    ui.ok(f"linked '{name}' -> {target}")
+    ui.note(f"mlxh rm {name} removes only the link, never the files")
 
 
 def cmd_list(_args):
     cfg = load_config()
     models = discover(cfg)
     if not models:
-        print(f"no models in {models_dir(cfg)}. Try: mlxh pull <hf-repo>")
+        print(f"no models in {models_dir(cfg)}")
+        ui.note("mlxh search <query> finds MLX models; mlxh pull <repo-id> installs one")
         return
     for name, path in models.items():
         kind = "linked" if path.is_symlink() else "pulled"
@@ -242,12 +257,13 @@ def cmd_rm(args):
     if path.is_symlink():
         target = path.resolve()
         path.unlink()
-        print(f"removed link '{args.name}' (files at {target} untouched)")
+        ui.ok(f"removed link '{args.name}'")
+        ui.note(f"files at {target} untouched")
     elif is_model(path):
         shutil.rmtree(path)
-        print(f"deleted {path}")
+        ui.ok(f"deleted {path}")
     else:
-        sys.exit(f"no model '{args.name}' in {models_dir(cfg)}")
+        ui.fail(f"no model named '{args.name}'", f"models dir: {models_dir(cfg)}")
 
 
 def cmd_serve(args):
@@ -287,13 +303,14 @@ def cmd_config(args):
         print(cfg.get(args.key))
         return
     if args.key not in KEY_TYPES:
-        sys.exit(f"unknown config key '{args.key}' (settable: {', '.join(KEY_TYPES)})")
+        ui.fail(f"unknown config key '{args.key}'",
+                f"settable: {', '.join(KEY_TYPES)}")
     try:
         cfg[args.key] = KEY_TYPES[args.key](args.value)
     except ValueError:
-        sys.exit(f"'{args.key}' expects a {KEY_TYPES[args.key].__name__}")
+        ui.fail(f"'{args.key}' expects a {KEY_TYPES[args.key].__name__}")
     save_config(cfg)
-    print(f"{args.key} = {cfg[args.key]}")
+    ui.ok(f"{args.key} = {cfg[args.key]}")
 
 
 def cmd_uninstall(args):
