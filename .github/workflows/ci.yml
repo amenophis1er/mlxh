@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unit:
+    # Unit tests touch no MLX code, so they run anywhere, fast.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install pytest
+      - run: pytest -q
+
+  package:
+    # Real dependency resolution + imports on Apple Silicon.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv venv --python 3.11 .venv
+      - run: uv pip install -p .venv/bin/python . pytest
+      - run: .venv/bin/python -c "import mlxh.cli, mlxh.loader, mlxh.toolcalls, mlxh.serve_app, mlxh.chat_cli"
+      - run: .venv/bin/python -m pytest -q

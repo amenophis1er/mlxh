@@ -25,6 +25,7 @@ Config keys (mlxh config <key> <value>):
   memory_limit_gb     MLX GPU/unified-memory limit, 0 = off
   cache_limit_gb      MLX buffer-cache limit, 0 = off
   gen_timeout_s       hard stop for one generation, 0 = off (600)
+  chat_tools          enable built-in chat tools by default (false)
 
 State lives under $MLXH_HOME (default ~/.mlxh): venv, app code, config,
 models, HF cache. Uninstall removes exactly that plus the launcher.
@@ -50,11 +51,20 @@ DEFAULTS = {
     "memory_limit_gb": 0.0,
     "cache_limit_gb": 0.0,
     "gen_timeout_s": 600,
+    "chat_tools": False,
 }
+def _bool(v):
+    if v.lower() in ("1", "true", "on", "yes"):
+        return True
+    if v.lower() in ("0", "false", "off", "no"):
+        return False
+    raise ValueError(v)
+
+
 KEY_TYPES = {
     "port": int, "host": str, "models_dir": str, "max_queued": int,
     "max_tokens_cap": int, "memory_limit_gb": float, "cache_limit_gb": float,
-    "gen_timeout_s": int,
+    "gen_timeout_s": int, "chat_tools": _bool,
 }
 
 
@@ -271,7 +281,8 @@ def cmd_run(args):
                 do_pull(cfg, args.target, name, force=args.force)
     path = resolve(cfg, name)
     os.execv(sys.executable, [
-        sys.executable, "-m", "mlxh.chat_cli", "--model-path", path, *args.rest,
+        sys.executable, "-m", "mlxh.chat_cli", "--model-path", path,
+        *_chat_args(cfg, args.rest),
     ])
 
 
@@ -374,11 +385,18 @@ def cmd_serve(args):
     ])
 
 
+def _chat_args(cfg, rest):
+    if cfg["chat_tools"] and "--tools" not in rest and "--no-tools" not in rest:
+        rest = ["--tools", *rest]
+    return rest
+
+
 def cmd_chat(args):
     cfg = load_config()
     path = resolve(cfg, args.name or pick_model(cfg, "chat with"))
     os.execv(sys.executable, [
-        sys.executable, "-m", "mlxh.chat_cli", "--model-path", path, *args.rest,
+        sys.executable, "-m", "mlxh.chat_cli", "--model-path", path,
+        *_chat_args(cfg, args.rest),
     ])
 
 
@@ -396,7 +414,8 @@ def cmd_config(args):
     try:
         cfg[args.key] = KEY_TYPES[args.key](args.value)
     except ValueError:
-        ui.fail(f"'{args.key}' expects a {KEY_TYPES[args.key].__name__}")
+        kind = "bool" if KEY_TYPES[args.key] is _bool else KEY_TYPES[args.key].__name__
+        ui.fail(f"'{args.key}' expects a {kind}")
     save_config(cfg)
     ui.ok(f"{args.key} = {cfg[args.key]}")
 

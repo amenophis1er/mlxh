@@ -5,6 +5,10 @@ from Hugging Face, chat in the terminal (with tools and images), and serve an
 OpenAI-compatible REST API. Everything it manages lives under one directory,
 so uninstalling is complete and clean.
 
+**Status: alpha.** Built and tested on a single machine (MacBook Pro M5 Pro,
+macOS 26). It works well there; expect rough edges elsewhere, and expect
+interfaces to change. No support commitments.
+
 Supports two model families behind one interface:
 
 - **Prism Hadamard packs** (e.g. `prism-ml/Ternary-Bonsai-2-27B-mlx-2bit`) —
@@ -46,6 +50,7 @@ mlxh link ~/some/existing/model --name mymodel                    # or symlink o
 mlxh list
 
 mlxh chat bonsai2                        # interactive: /image <path>, /reset, Ctrl-D
+mlxh chat bonsai2 -- --tools             # with built-in tools (weather, time, calc)
 mlxh chat bonsai2 -- -p "one question"   # one-shot (args after the name pass through)
 
 mlxh serve bonsai2 --port 8081           # OpenAI-compatible API at /v1
@@ -85,9 +90,12 @@ The API supports `/v1/chat/completions` (streaming + non-streaming),
 via `image_url` parts (base64 data URLs or local paths). Point any OpenAI
 client at `http://localhost:<port>/v1` with any API key.
 
-The chat CLI ships three built-in tools the model can call: live weather
-(Open-Meteo), current time, and a safe calculator. Add your own in
-`src/mlxh/toolcalls.py` (`TOOL_REGISTRY` + `TOOL_SPECS`).
+The chat CLI ships three built-in tools the model can call: live weather,
+current time, and a safe calculator. They are **off by default** — enable per
+run with `--tools`, or persistently with `mlxh config chat_tools on`. The
+weather tool calls the free Open-Meteo API over the network; every tool
+execution is printed as it happens. Add your own in `src/mlxh/toolcalls.py`
+(`TOOL_REGISTRY` + `TOOL_SPECS`).
 
 Throughput numbers from the machine this was built on are in
 [docs/BENCHMARKS.md](docs/BENCHMARKS.md).

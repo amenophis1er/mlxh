@@ -78,7 +78,9 @@ def main():
     ap.add_argument("-p", "--prompt", help="one-shot prompt (omit for interactive chat)")
     ap.add_argument("-i", "--image", action="append", default=[], help="image file to include")
     ap.add_argument("--max-tokens", type=int, default=1024)
-    ap.add_argument("--no-tools", action="store_true", help="disable built-in tools")
+    ap.add_argument("--tools", action="store_true",
+                    help="enable built-in tools (weather, time, calculator)")
+    ap.add_argument("--no-tools", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args()
 
     print(f"Loading {Path(args.model_path).name}...", file=sys.stderr)
@@ -88,9 +90,12 @@ def main():
         sys.exit(str(e))
     if args.image and not runner.supports_images:
         sys.exit("this model does not support images")
-    tools = not args.no_tools
+    tools = args.tools and not args.no_tools
     if tools:
         print(f"Tools enabled: {', '.join(TOOL_REGISTRY)}", file=sys.stderr)
+    else:
+        print("Tools off (enable with --tools: "
+              f"{', '.join(TOOL_REGISTRY)}; get_weather calls open-meteo.com)", file=sys.stderr)
 
     if args.prompt:
         messages = [{"role": "user", "content": args.prompt}]
