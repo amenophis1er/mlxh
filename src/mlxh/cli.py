@@ -112,14 +112,29 @@ def resolve(cfg, name):
 
 
 def cmd_search(args):
+    from concurrent.futures import ThreadPoolExecutor
     from huggingface_hub import HfApi
-    results = list(HfApi().list_models(
+
+    api = HfApi()
+    results = list(api.list_models(
         search=args.query, filter="mlx", sort="downloads", limit=args.limit,
         expand=["downloads", "lastModified", "safetensors"],
     ))
     if not results:
         print(f"no MLX models match '{args.query}' — try https://huggingface.co/models?library=mlx")
         return
+
+    def size_of(repo_id):
+        # download size = sum of the repo's files; one small extra call per row
+        try:
+            info = api.model_info(repo_id, files_metadata=True)
+            total = sum(s.size or 0 for s in info.siblings)
+            return f"{total / 1e9:.1f} GB" if total else "-"
+        except Exception:
+            return "-"
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        sizes = list(pool.map(size_of, [m.id for m in results]))
 
     def params_of(m):
         st = getattr(m, "safetensors", None)
@@ -128,10 +143,10 @@ def cmd_search(args):
         n = st.total
         return f"{n / 1e9:.1f}B" if n >= 1e9 else f"{n / 1e6:.0f}M"
 
-    print(f"{'REPO':56} {'PARAMS':>7} {'DOWNLOADS':>10}  UPDATED")
-    for m in results:
+    print(f"{'REPO':56} {'PARAMS':>7} {'SIZE':>8} {'DOWNLOADS':>10}  UPDATED")
+    for m, size in zip(results, sizes):
         updated = m.last_modified.strftime("%Y-%m-%d") if m.last_modified else "-"
-        print(f"{m.id:56} {params_of(m):>7} {m.downloads or 0:>10,}  {updated}")
+        print(f"{m.id:56} {params_of(m):>7} {size:>8} {m.downloads or 0:>10,}  {updated}")
     print(f"\ninstall one with: mlxh pull <repo-id>")
 
 
