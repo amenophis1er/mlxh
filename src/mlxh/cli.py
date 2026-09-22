@@ -118,6 +118,34 @@ def resolve(cfg, name):
     return str(path)
 
 
+def pick_model(cfg, purpose):
+    """Choose an installed model when none was named."""
+    models = list(discover(cfg))
+    if not models:
+        ui.fail("no models installed",
+                hint="mlxh search <query> finds MLX models; mlxh pull <repo-id> installs one")
+    if len(models) == 1:
+        ui.note(f"using {models[0]}")
+        return models[0]
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        ui.fail(f"which model do you want to {purpose}?",
+                f"available: {', '.join(models)}")
+    print(ui.dim(f"select a model to {purpose}:"))
+    for i, n in enumerate(models, 1):
+        print(f"  {i}) {n}")
+    while True:
+        try:
+            choice = input("> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            sys.exit(130)
+        if choice.isdigit() and 1 <= int(choice) <= len(models):
+            return models[int(choice) - 1]
+        if choice in models:
+            return choice
+        print(ui.dim(f"enter 1-{len(models)} or a model name"))
+
+
 def cmd_search(args):
     from concurrent.futures import ThreadPoolExecutor
     from huggingface_hub import HfApi
@@ -242,13 +270,13 @@ def repo_installed_as(cfg, repo):
 
 def cmd_run(args):
     cfg = load_config()
-    name = args.target
+    name = args.target or pick_model(cfg, "run")
     if "/" in name:  # a Hugging Face repo id
         installed = repo_installed_as(cfg, name)
         if installed:
             name = installed
         else:
-            name = args.target.split("/")[-1]
+            name = name.split("/")[-1]
             if not is_model(models_dir(cfg) / name):
                 do_pull(cfg, args.target, name, force=args.force)
     path = resolve(cfg, name)
@@ -337,14 +365,15 @@ def cmd_rm(args):
 
 def cmd_serve(args):
     cfg = load_config()
-    path = resolve(cfg, args.name)
+    name = args.name or pick_model(cfg, "serve")
+    path = resolve(cfg, name)
 
     def pick(cli_value, key):
         return cli_value if cli_value is not None else cfg[key]
 
     os.execv(sys.executable, [
         sys.executable, "-m", "mlxh.serve_app",
-        "--model-path", path, "--name", args.name,
+        "--model-path", path, "--name", name,
         "--port", str(pick(args.port, "port")),
         "--host", str(pick(args.host, "host")),
         "--max-queued", str(pick(args.max_queued, "max_queued")),
@@ -357,7 +386,7 @@ def cmd_serve(args):
 
 def cmd_chat(args):
     cfg = load_config()
-    path = resolve(cfg, args.name)
+    path = resolve(cfg, args.name or pick_model(cfg, "chat with"))
     os.execv(sys.executable, [
         sys.executable, "-m", "mlxh.chat_cli", "--model-path", path, *args.rest,
     ])
@@ -413,7 +442,8 @@ def main():
     p.set_defaults(fn=cmd_search)
 
     p = sub.add_parser("run", help="chat with a model, pulling it first if needed")
-    p.add_argument("target", help="installed model name or Hugging Face repo id")
+    p.add_argument("target", nargs="?",
+                   help="installed model name or Hugging Face repo id")
     p.add_argument("--force", action="store_true",
                    help="download even if it exceeds this machine's memory")
     p.add_argument("rest", nargs=argparse.REMAINDER)
@@ -444,7 +474,7 @@ def main():
     p.set_defaults(fn=cmd_rm)
 
     p = sub.add_parser("serve", help="run the OpenAI-compatible API server")
-    p.add_argument("name")
+    p.add_argument("name", nargs="?")
     p.add_argument("--port", type=int)
     p.add_argument("--host")
     p.add_argument("--max-queued", type=int, dest="max_queued")
@@ -455,7 +485,7 @@ def main():
     p.set_defaults(fn=cmd_serve)
 
     p = sub.add_parser("chat", help="terminal chat (extra args go to the chat CLI)")
-    p.add_argument("name")
+    p.add_argument("name", nargs="?")
     p.add_argument("rest", nargs=argparse.REMAINDER)
     p.set_defaults(fn=cmd_chat)
 
