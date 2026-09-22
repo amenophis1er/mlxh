@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.1.0 — unreleased
+## v0.1.0 — 2026-09-22
 
 Alpha: developed and tested on one machine
 (MacBook Pro M5 Pro, 48 GB, macOS 26); interfaces may change.
@@ -33,9 +33,12 @@ Alpha: developed and tested on one machine
 - **Anthropic API + launch**: `serve` also speaks the Anthropic Messages
   API (`/v1/messages`, streaming and non-streaming, tool use, images,
   count_tokens), so Claude Code works against local models.
-  `mlxh launch claude|codex [--model NAME]` starts a server if needed,
-  wires the agent's environment, and runs it (`--dry-run` prints the
-  wiring).
+  `mlxh launch claude|codex|pi [--model NAME]` starts a server if
+  needed, wires the agent (env vars, Codex model_provider overrides, or
+  pi's models.json), and runs it (`--dry-run` prints the wiring;
+  `--no-mcp` shrinks Claude Code's prompt for local models).
+- **Home menu**: bare `mlxh` opens an interactive menu — launch a coding
+  agent, chat, serve, or list models with arrow keys.
 - **Prompt caching + thinking**: the server reuses KV blocks across
   requests (mlx-vlm automatic prefix caching; `prompt_cache` config) so
   same-prefix follow-ups skip prompt reprocessing. `thinking auto/on/off`
