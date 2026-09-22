@@ -124,11 +124,25 @@ def main():
             pass
         readline.set_history_length(500)
         atexit.register(lambda: readline.write_history_file(hist))
-        # The \001/\002 non-printing markers are GNU-readline-only; under
-        # macOS libedit they corrupt input accounting and drop keystrokes
-        # (e.g. "/exit" arriving as "/ext"), so colorize the prompt only on
-        # real GNU readline.
+
+        # Tab-complete the slash commands. Without a completer, a Tab on a
+        # partial word (e.g. "/exi<Tab>") runs the default filename completion,
+        # which inserts stray whitespace and dirties the line.
+        cmds = ["/exit", "/reset", "/help", "/bye", "/quit"]
+        if runner.supports_images:
+            cmds.insert(0, "/image ")
+
+        def completer(text, state):
+            hits = [c for c in cmds if c.startswith(text)] if text.startswith("/") else []
+            return hits[state] if state < len(hits) else None
+
+        readline.set_completer(completer)
+        readline.set_completer_delims(" \t\n")  # treat "/exit" as one word
         is_gnu = "libedit" not in (readline.__doc__ or "")
+        readline.parse_and_bind("tab: complete" if is_gnu else "bind ^I rl_complete")
+        # The \001/\002 non-printing markers are GNU-readline-only; under
+        # macOS libedit they corrupt input accounting, so colorize the prompt
+        # only on real GNU readline.
         prompt_ansi = (is_gnu and sys.stdin.isatty() and sys.stdout.isatty()
                        and not os.environ.get("NO_COLOR"))
     except ImportError:
