@@ -83,6 +83,26 @@ def discover(cfg):
     return {p.name: p for p in sorted(root.iterdir()) if p.is_dir() and is_model(p)}
 
 
+def source_of(path):
+    """Where a model came from: repo@rev if mlxh pulled it, best effort otherwise."""
+    meta = path / ".mlxh.json"
+    if meta.is_file():
+        try:
+            m = json.loads(meta.read_text())
+            return f"{m['repo']}@{m.get('revision', '')[:7]}".rstrip("@")
+        except (json.JSONDecodeError, KeyError):
+            pass
+    # Dir downloaded by other HF tooling: local metadata has the revision only.
+    for f in (path / ".cache" / "huggingface" / "download").glob("*.metadata"):
+        try:
+            rev = f.read_text().splitlines()[0].strip()
+            if len(rev) == 40:
+                return f"hf@{rev[:7]}"
+        except (OSError, IndexError):
+            continue
+    return "-"
+
+
 def resolve(cfg, name):
     path = models_dir(cfg) / name
     if not is_model(path):
@@ -114,10 +134,20 @@ def cmd_pull(args):
         sys.exit(f"'{name}' already exists ({dest}); pick --name or `mlxh rm {name}` first")
     dest.parent.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("HF_HOME", str(HOME / "hf-cache"))
-    from huggingface_hub import snapshot_download
+    from datetime import datetime, timezone
+    from huggingface_hub import HfApi, snapshot_download
     print(f"Downloading {args.repo} -> {dest}")
     snapshot_download(args.repo, local_dir=str(dest))
-    print(f"Done. Try: mlxh chat {name}")
+    try:
+        revision = HfApi().model_info(args.repo).sha or ""
+    except Exception:
+        revision = ""
+    (dest / ".mlxh.json").write_text(json.dumps({
+        "repo": args.repo,
+        "revision": revision,
+        "pulled_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }, indent=2))
+    print(f"Done ({args.repo}@{revision[:7]}). Try: mlxh chat {name}")
 
 
 def cmd_link(args):
@@ -143,7 +173,10 @@ def cmd_list(_args):
     for name, path in models.items():
         kind = "linked" if path.is_symlink() else "pulled"
         n = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
-        print(f"{name:24} {kind:7} {n / 1e9:7.1f} GB  {path.resolve() if path.is_symlink() else path}")
+        line = f"{name:24} {kind:7} {n / 1e9:7.1f} GB  {source_of(path):48}"
+        if path.is_symlink():
+            line += f"  -> {path.resolve()}"
+        print(line.rstrip())
 
 
 def cmd_rm(args):
