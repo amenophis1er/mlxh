@@ -77,7 +77,10 @@ def select(title, options, annotations=None):
             # os.read on the fd, not sys.stdin.read: Python's buffering would
             # swallow the rest of an escape sequence and select() would then
             # misread an arrow key as a bare Esc.
-            ch = os.read(fd, 1).decode(errors="replace")
+            try:
+                ch = os.read(fd, 1).decode(errors="replace")
+            except KeyboardInterrupt:
+                sys.exit(130)
             if ch == "\x1b":
                 if _select.select([fd], [], [], 0.05)[0]:
                     seq = os.read(fd, 2).decode(errors="replace")

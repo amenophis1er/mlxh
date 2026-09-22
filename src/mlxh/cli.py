@@ -508,7 +508,11 @@ def main():
     p.set_defaults(fn=cmd_uninstall)
 
     args = ap.parse_args()
-    args.fn(args)
+    try:
+        args.fn(args)
+    except KeyboardInterrupt:
+        print()
+        sys.exit(130)
 
 
 if __name__ == "__main__":
