@@ -37,7 +37,6 @@ from pathlib import Path
 
 HOME = Path(os.environ.get("MLXH_HOME", Path.home() / ".mlxh"))
 CONFIG = HOME / "config.json"
-APP = Path(__file__).parent
 DEFAULTS = {
     "port": 8081,
     "host": "127.0.0.1",
@@ -154,7 +153,7 @@ def cmd_serve(args):
         return cli_value if cli_value is not None else cfg[key]
 
     os.execv(sys.executable, [
-        sys.executable, str(APP / "serve_app.py"),
+        sys.executable, "-m", "mlxh.serve_app",
         "--model-path", path, "--name", args.name,
         "--port", str(pick(args.port, "port")),
         "--host", str(pick(args.host, "host")),
@@ -170,7 +169,7 @@ def cmd_chat(args):
     cfg = load_config()
     path = resolve(cfg, args.name)
     os.execv(sys.executable, [
-        sys.executable, str(APP / "chat_cli.py"), "--model-path", path, *args.rest,
+        sys.executable, "-m", "mlxh.chat_cli", "--model-path", path, *args.rest,
     ])
 
 

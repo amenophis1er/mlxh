@@ -18,8 +18,8 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 
-from loader import load_runner
-from toolcalls import parse_tool_calls
+from .loader import load_runner
+from .toolcalls import parse_tool_calls
 
 app = FastAPI(title="mlxh")
 runner = None

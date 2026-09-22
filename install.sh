@@ -14,7 +14,7 @@ SRC="$(cd "$(dirname "$0")" 2>/dev/null && pwd || true)"
 
 command -v uv >/dev/null || { echo "error: uv is required (brew install uv)"; exit 1; }
 
-if [ -z "$SRC" ] || [ ! -d "$SRC/app" ]; then
+if [ -z "$SRC" ] || [ ! -f "$SRC/pyproject.toml" ]; then
   # Not running from a checkout (e.g. curl | bash): fetch the repo tarball.
   command -v curl >/dev/null || { echo "error: curl is required"; exit 1; }
   TMP="$(mktemp -d)"
@@ -25,24 +25,23 @@ if [ -z "$SRC" ] || [ ! -d "$SRC/app" ]; then
   curl -fsSL "${AUTH[@]}" "https://api.github.com/repos/$REPO/tarball/main" \
     | tar -xz -C "$TMP"
   SRC="$(find "$TMP" -mindepth 1 -maxdepth 1 -type d | head -1)"
-  [ -d "$SRC/app" ] || { echo "error: download did not contain app/"; exit 1; }
+  [ -f "$SRC/pyproject.toml" ] || { echo "error: download did not contain pyproject.toml"; exit 1; }
 fi
 
 echo "Installing mlxh into $PREFIX"
 mkdir -p "$PREFIX" "$BIN"
-rm -rf "$PREFIX/app"
-cp -R "$SRC/app" "$PREFIX/app"
+rm -rf "$PREFIX/app"  # layout from pre-package versions
 
 if [ ! -x "$PREFIX/venv/bin/python" ]; then
   uv venv --python 3.11 "$PREFIX/venv"
 fi
-uv pip install -p "$PREFIX/venv/bin/python" -r "$PREFIX/app/requirements.txt"
+uv pip install -p "$PREFIX/venv/bin/python" --reinstall-package mlxh "$SRC"
 
 cat > "$BIN/mlxh" <<EOF
 #!/bin/bash
 export MLXH_HOME="$PREFIX"
 export MLXH_LAUNCHER="$BIN/mlxh"
-exec "$PREFIX/venv/bin/python" "$PREFIX/app/mlxh.py" "\$@"
+exec "$PREFIX/venv/bin/mlxh" "\$@"
 EOF
 chmod +x "$BIN/mlxh"
 

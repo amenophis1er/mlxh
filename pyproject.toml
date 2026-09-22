@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mlxh"
+version = "0.1.0"
+description = "Local MLX model harness for Apple Silicon: pull models from Hugging Face, chat with tools and images, serve an OpenAI-compatible API."
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Amen AMOUZOU" }]
+requires-python = ">=3.11"
+keywords = ["mlx", "apple-silicon", "llm", "openai-api", "local-llm"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "mlx==0.32.0",
+    "mlx-lm==0.31.3",
+    "mlx-vlm==0.6.3",
+    "transformers==5.5.0",
+    "numpy>=2.0",
+    "tokenizers>=0.21",
+    "jinja2>=3.1",
+    "pillow>=10.0",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "huggingface_hub>=0.30",
+]
+
+[project.urls]
+Homepage = "https://github.com/amenophis1er/mlxh"
+Issues = "https://github.com/amenophis1er/mlxh/issues"
+
+[project.scripts]
+mlxh = "mlxh.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mlxh"]

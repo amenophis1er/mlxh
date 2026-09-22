@@ -20,6 +20,12 @@ Quick install, no clone needed (requires [uv](https://docs.astral.sh/uv/)):
 curl -fsSL https://raw.githubusercontent.com/amenophis1er/mlxh/main/install.sh | bash
 ```
 
+Or as a uv tool (isolated env, managed by uv):
+
+```bash
+uv tool install git+https://github.com/amenophis1er/mlxh
+```
+
 Or from a checkout:
 
 ```bash
@@ -78,7 +84,7 @@ client at `http://localhost:<port>/v1` with any API key.
 
 The chat CLI ships three built-in tools the model can call: live weather
 (Open-Meteo), current time, and a safe calculator. Add your own in
-`app/toolcalls.py` (`TOOL_REGISTRY` + `TOOL_SPECS`).
+`src/mlxh/toolcalls.py` (`TOOL_REGISTRY` + `TOOL_SPECS`).
 
 Throughput numbers from the machine this was built on are in
 [docs/BENCHMARKS.md](docs/BENCHMARKS.md).

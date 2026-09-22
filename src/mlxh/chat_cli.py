@@ -9,8 +9,8 @@ import json
 import sys
 from pathlib import Path
 
-from loader import load_runner
-from toolcalls import TOOL_REGISTRY, TOOL_SPECS, parse_tool_calls, run_tool
+from .loader import load_runner
+from .toolcalls import TOOL_REGISTRY, TOOL_SPECS, parse_tool_calls, run_tool
 
 MAX_TOOL_ROUNDS = 5
 
