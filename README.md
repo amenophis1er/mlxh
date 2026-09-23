@@ -169,8 +169,8 @@ Vision models accept local files, web images, and the macOS image clipboard:
 The no-argument form reads the current clipboard image. Terminals do not pass
 binary clipboard contents through ordinary Cmd-V, so this explicit command is
 used instead. If a terminal or client pastes an image as a local file path,
-mlxh recognizes a leading path automatically, so
-`/tmp/screenshot.png What's this?` attaches the image and sends the question.
+mlxh recognizes the path anywhere in the prompt, so
+`What's this? /tmp/screenshot.png` attaches the image and sends the question.
 URL downloads are limited to 25 MB, validated as images, and—like clipboard
 captures—removed after the next message is processed.
 

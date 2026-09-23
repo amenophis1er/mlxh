@@ -66,18 +66,24 @@ def test_prepare_image_accepts_path_url_and_clipboard(tmp_path, monkeypatch):
         chat_cli._prepare_image("file:///tmp/a.png")
 
 
-def test_leading_pasted_image_path_becomes_an_attachment(tmp_path, monkeypatch):
+def test_pasted_image_path_becomes_an_attachment_anywhere(tmp_path, monkeypatch):
     image = tmp_path / "clipboard image.png"
     image.write_bytes(b"image")
     monkeypatch.setattr(chat_cli, "_validate_image", lambda _path: None)
 
-    prompt, images = chat_cli._extract_leading_images(
+    prompt, images = chat_cli._extract_image_paths(
         f'"{image}" What is in this image?'
     )
     assert prompt == "What is in this image?"
     assert images == [str(image)]
 
-    prompt, images = chat_cli._extract_leading_images("Explain /tmp/missing.png")
+    prompt, images = chat_cli._extract_image_paths(
+        f'What is this? "{image}"'
+    )
+    assert prompt == "What is this?"
+    assert images == [str(image)]
+
+    prompt, images = chat_cli._extract_image_paths("Explain /tmp/missing.png")
     assert prompt == "Explain /tmp/missing.png"
     assert images == []
 

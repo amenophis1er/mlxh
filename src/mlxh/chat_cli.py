@@ -138,26 +138,27 @@ def _prepare_image(source=None):
     return str(path), False
 
 
-def _extract_leading_images(text):
-    """Turn leading pasted/dragged image paths into attachments."""
+def _extract_image_paths(text):
+    """Turn pasted/dragged local image paths into attachments."""
     try:
         parts = shlex.split(text)
     except ValueError:
         return text, []
-    images = []
-    while parts:
-        path = Path(parts[0]).expanduser()
+    images, remaining = [], []
+    for part in parts:
+        path = Path(part).expanduser()
         if not path.is_file():
-            break
+            remaining.append(part)
+            continue
         try:
             _validate_image(path)
         except ValueError:
-            break
+            remaining.append(part)
+            continue
         images.append(str(path))
-        parts.pop(0)
     if not images:
         return text, []
-    return " ".join(parts), images
+    return " ".join(remaining), images
 
 
 def _cleanup_images(paths):
@@ -389,7 +390,7 @@ def main():
             print(f"(attached {label} — will be sent with your next message)",
                   file=sys.stderr)
             continue
-        user, pasted_images = _extract_leading_images(user)
+        user, pasted_images = _extract_image_paths(user)
         if pasted_images:
             staged.extend(pasted_images)
             names = ", ".join(Path(path).name for path in pasted_images)
