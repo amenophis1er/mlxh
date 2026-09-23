@@ -12,6 +12,7 @@ import re
 import shlex
 import sys
 import tempfile
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -280,6 +281,7 @@ def generate_once(runner, messages, images, max_tokens, specs, thinking=None):
 
 def ask(runner, messages, images, max_tokens, tools=None, thinking=None):
     """tools: (registry, specs) to enable the agent loop, or None."""
+    started = time.perf_counter()
     registry, specs = tools if tools else ({}, None)
     total_tokens, tps = 0, 0.0
     for _ in range(MAX_TOOL_ROUNDS):
@@ -289,7 +291,9 @@ def ask(runner, messages, images, max_tokens, tools=None, thinking=None):
         tps = last.generation_tps
         content, tool_calls = parse_tool_calls(text)
         if not tool_calls:
-            print("\n\n" + ui.dim(f"[{total_tokens} tokens @ {tps:.1f} tok/s]"))
+            elapsed = time.perf_counter() - started
+            stats = f"{total_tokens} tokens in {elapsed:.1f}s @ {tps:.1f} tok/s"
+            print("\n\n" + ui.dim(f"[{stats}]"))
             messages.append({"role": "assistant", "content": content})
             return content
         messages.append({

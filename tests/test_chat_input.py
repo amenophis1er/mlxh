@@ -2,6 +2,7 @@ import asyncio
 import subprocess
 import urllib.request
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -179,3 +180,19 @@ def test_download_image_stops_when_stream_exceeds_limit(monkeypatch):
     monkeypatch.setattr(chat_cli, "MAX_IMAGE_DOWNLOAD", 4)
     with pytest.raises(ValueError, match="larger than"):
         chat_cli._download_image("https://example.com/image.png")
+
+
+def test_ask_reports_total_execution_time(monkeypatch, capsys):
+    response = SimpleNamespace(generation_tokens=42, generation_tps=10.0)
+    monkeypatch.setattr(
+        chat_cli, "generate_once",
+        lambda *_args, **_kwargs: ("answer", response),
+    )
+    clock = iter((10.0, 12.35))
+    monkeypatch.setattr(chat_cli.time, "perf_counter", lambda: next(clock))
+    messages = [{"role": "user", "content": "question"}]
+
+    assert chat_cli.ask(None, messages, [], 100) == "answer"
+
+    assert "[42 tokens in 2.3s @ 10.0 tok/s]" in capsys.readouterr().out
+    assert messages[-1] == {"role": "assistant", "content": "answer"}

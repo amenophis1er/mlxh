@@ -4,7 +4,8 @@
 
 - **Chat output**: streamed responses now use a live Rich Markdown renderer
   for headings, lists, tables, links, and fenced code blocks; pipes and
-  `NO_COLOR` still receive plain output.
+  `NO_COLOR` still receive plain output. The response footer includes total
+  wall-clock execution time alongside output tokens and generation speed.
 - **Chat input**: multiline terminal pastes remain one editable message and
   wait for an explicit Enter before generation starts.
 - **Chat images**: Ctrl-V reads the macOS image clipboard and inserts an
