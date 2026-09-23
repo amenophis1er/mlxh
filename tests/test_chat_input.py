@@ -66,6 +66,22 @@ def test_prepare_image_accepts_path_url_and_clipboard(tmp_path, monkeypatch):
         chat_cli._prepare_image("file:///tmp/a.png")
 
 
+def test_leading_pasted_image_path_becomes_an_attachment(tmp_path, monkeypatch):
+    image = tmp_path / "clipboard image.png"
+    image.write_bytes(b"image")
+    monkeypatch.setattr(chat_cli, "_validate_image", lambda _path: None)
+
+    prompt, images = chat_cli._extract_leading_images(
+        f'"{image}" What is in this image?'
+    )
+    assert prompt == "What is in this image?"
+    assert images == [str(image)]
+
+    prompt, images = chat_cli._extract_leading_images("Explain /tmp/missing.png")
+    assert prompt == "Explain /tmp/missing.png"
+    assert images == []
+
+
 def test_clipboard_image_is_captured_to_a_temporary_file(monkeypatch):
     def run(args, **_kwargs):
         Path(args[-1]).write_bytes(b"clipboard image")

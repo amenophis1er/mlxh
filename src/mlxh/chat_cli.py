@@ -138,6 +138,28 @@ def _prepare_image(source=None):
     return str(path), False
 
 
+def _extract_leading_images(text):
+    """Turn leading pasted/dragged image paths into attachments."""
+    try:
+        parts = shlex.split(text)
+    except ValueError:
+        return text, []
+    images = []
+    while parts:
+        path = Path(parts[0]).expanduser()
+        if not path.is_file():
+            break
+        try:
+            _validate_image(path)
+        except ValueError:
+            break
+        images.append(str(path))
+        parts.pop(0)
+    if not images:
+        return text, []
+    return " ".join(parts), images
+
+
 def _cleanup_images(paths):
     for path in tuple(paths):
         Path(path).unlink(missing_ok=True)
@@ -367,6 +389,13 @@ def main():
             print(f"(attached {label} — will be sent with your next message)",
                   file=sys.stderr)
             continue
+        user, pasted_images = _extract_leading_images(user)
+        if pasted_images:
+            staged.extend(pasted_images)
+            names = ", ".join(Path(path).name for path in pasted_images)
+            print(f"(attached {names})", file=sys.stderr)
+            if not user:
+                continue
         history.append({"role": "user", "content": user})
         print()
         try:
