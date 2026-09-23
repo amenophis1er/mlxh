@@ -10,7 +10,8 @@
   wait for an explicit Enter before generation starts.
 - **Chat images**: Ctrl-V reads the macOS image clipboard and inserts an
   `[Image #N]` marker; `/image [path-or-URL]` also stages a clipboard, local,
-  or bounded remote image.
+  or bounded remote image. Pi registrations now advertise each local model's
+  image-input capability, so Pi forwards images to vision models.
 
 ## v0.1.1 — 2026-09-23
 

@@ -48,6 +48,29 @@ def test_discover_and_resolve(mdir):
         cli.resolve(cfg, "missing")
 
 
+def test_model_supports_images_from_local_config(mdir):
+    prism_vision = make_model(mdir, "prism-vision")
+    prism_vision.joinpath("config.json").write_text(json.dumps({
+        "model_type": "prism_hadamard_qwen35",
+        "components": {"text": True, "vision": True},
+    }))
+    prism_text = make_model(mdir, "prism-text")
+    prism_text.joinpath("config.json").write_text(json.dumps({
+        "model_type": "prism_hadamard_qwen35",
+        "components": {"text": True, "vision": False},
+        "vision_config": {},
+    }))
+    stock_vision = make_model(mdir, "stock-vision")
+    stock_vision.joinpath("config.json").write_text(json.dumps({
+        "model_type": "qwen3_vl",
+        "vision_config": {},
+    }))
+
+    assert cli.model_supports_images(prism_vision)
+    assert not cli.model_supports_images(prism_text)
+    assert cli.model_supports_images(stock_vision)
+
+
 def test_source_of(mdir):
     p = make_model(mdir, "m1", repo="org/model")
     assert cli.source_of(p) == "org/model@aaaaaaa"
@@ -130,16 +153,33 @@ def test_serve_argv_includes_all_knobs(mdir):
 def test_pi_register_provider(tmp_path):
     path = tmp_path / "models.json"
     path.write_text(json.dumps({"providers": {"ollama": {"baseUrl": "http://x"}}}))
-    out = cli.pi_register_provider(1060, "gemma4-12b", path=path)
+    out = cli.pi_register_provider(
+        1060, "gemma4-12b", path=path, supports_images=True
+    )
     data = json.loads(out.read_text())
     assert data["providers"]["ollama"]["baseUrl"] == "http://x"  # untouched
     prov = data["providers"]["mlxh"]
     assert prov["baseUrl"] == "http://127.0.0.1:1060/v1"
     assert prov["compat"]["supportsDeveloperRole"] is False
-    assert {"id": "gemma4-12b"} in prov["models"]
+    assert {"id": "gemma4-12b", "input": ["text", "image"]} in prov["models"]
     # idempotent + adds second model
     cli.pi_register_provider(2000, "qwen-tiny", path=path)
     prov = json.loads(path.read_text())["providers"]["mlxh"]
     assert prov["baseUrl"].endswith(":2000/v1")
     assert len([m for m in prov["models"] if m["id"] == "gemma4-12b"]) == 1
-    assert {"id": "qwen-tiny"} in prov["models"]
+    assert {"id": "qwen-tiny", "input": ["text"]} in prov["models"]
+
+
+def test_pi_register_provider_updates_existing_model_metadata(tmp_path):
+    path = tmp_path / "models.json"
+    path.write_text(json.dumps({"providers": {"mlxh": {"models": [{
+        "id": "bonsai2", "contextWindow": 32768, "input": ["text"],
+    }]}}}))
+
+    cli.pi_register_provider(1060, "bonsai2", path=path, supports_images=True)
+
+    model = json.loads(path.read_text())["providers"]["mlxh"]["models"][0]
+    assert model == {
+        "id": "bonsai2", "contextWindow": 32768,
+        "input": ["text", "image"],
+    }

@@ -109,6 +109,22 @@ def is_model(path):
     return (path / "config.json").is_file()
 
 
+def model_supports_images(path):
+    """Read enough local model metadata to advertise image input safely."""
+    try:
+        cfg = json.loads((Path(path) / "config.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(cfg, dict):
+        return False
+    if str(cfg.get("model_type", "")).startswith("prism_"):
+        return bool((cfg.get("components") or {}).get("vision"))
+    return any(cfg.get(key) is not None for key in (
+        "vision_config", "vision_tower", "mm_vision_tower",
+        "multimodal_projector_config",
+    ))
+
+
 def discover(cfg):
     root = models_dir(cfg)
     if not root.is_dir():
@@ -693,7 +709,7 @@ AGENTS = {
 }
 
 
-def pi_register_provider(port, model, path=None):
+def pi_register_provider(port, model, path=None, supports_images=False):
     """Merge an 'mlxh' provider into pi's models.json (non-destructively)."""
     path = path or Path.home() / ".pi" / "agent" / "models.json"
     data = {}
@@ -713,8 +729,11 @@ def pi_register_provider(port, model, path=None):
                    "supportsReasoningEffort": False},
     })
     models = prov.setdefault("models", [])
-    if not any(m.get("id") == model for m in models):
-        models.append({"id": model})
+    entry = next((item for item in models if item.get("id") == model), None)
+    if entry is None:
+        entry = {"id": model}
+        models.append(entry)
+    entry["input"] = ["text", "image"] if supports_images else ["text"]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2))
     return path
@@ -816,7 +835,10 @@ def cmd_launch(args):
             pass
 
     if args.agent == "pi":
-        ui.note(f"registered provider 'mlxh' in {pi_register_provider(port, name)}")
+        registry = pi_register_provider(
+            port, name, supports_images=model_supports_images(path)
+        )
+        ui.note(f"registered provider 'mlxh' in {registry}")
 
     if not _shutil.which(args.agent):
         if started:
