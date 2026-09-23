@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.1.1 — 2026-09-23
+
+- **Live diagnostics**: `GET /mlxh/info` now reports MLX memory, process
+  uptime/readiness, queue activity, request and token counters, and a stable
+  peak-memory snapshot. New `mlxh status` and `mlxh status --json` commands
+  expose the same data for people and scripts.
+- **Persistent server**: `mlxh service install|uninstall|restart` manages an
+  opt-in per-user macOS LaunchAgent. It validates the configured model,
+  forces localhost binding, safely handles occupied ports and reinstalls,
+  writes an atomic plist, and integrates with `mlxh uninstall`.
+- **Service reliability**: launcher discovery honors `MLXH_LAUNCHER`, load
+  failures retain full tracebacks in `service.log`, and service lifecycle
+  errors preserve the installed plist rather than leaving an unmanaged job.
+
 ## v0.1.0 — 2026-09-22
 
 Alpha: developed and tested on one machine
