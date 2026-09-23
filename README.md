@@ -91,6 +91,13 @@ Set persistently with `mlxh config <key> <value>`, or per run with
 `mlxh status` shows live memory, queue, traffic, and process statistics for
 the local server; use `mlxh status --json` for scripts.
 
+To keep one model available across logins, opt in with
+`mlxh config service_model bonsai2 && mlxh service install`. The per-user
+LaunchAgent always binds to localhost and can be restarted with `mlxh service
+restart`; remove it with `mlxh service uninstall` or `mlxh uninstall`.
+LaunchAgents start at login rather than boot, hold the model in RAM while
+running, and append unrotated output to `~/.mlxh/service.log`.
+
 The last two exist because long contexts are a real hazard on unified memory:
 KV cache grows with prompt length, and an unbounded 30k-token request can
 exhaust RAM and freeze the whole machine. The server fails a request rather

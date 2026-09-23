@@ -9,6 +9,7 @@ Commands:
   mlxh rm <name>                      remove a model (links: symlink only)
   mlxh serve <name> [--port N ...]    OpenAI + Anthropic compatible API server
   mlxh status [--json]                show live stats of the local server
+  mlxh service <action>               manage the login LaunchAgent
   mlxh launch <agent> [--model NAME]  run a coding agent (claude, codex, pi)
   mlxh chat <name> [chat args...]     terminal chat (tools, images, streaming)
   mlxh config [key [value]]           show or set config
@@ -31,6 +32,7 @@ Config keys (mlxh config <key> <value>):
   prompt_cache        reuse KV blocks across requests (true)
   thinking            model reasoning: auto / on / off (auto)
   chat_tools          load ~/.mlxh/tools.py in chat by default (false)
+  service_model       model loaded by `mlxh service install` (unset)
 
 State lives under $MLXH_HOME (default ~/.mlxh): venv, app code, config,
 models, HF cache. Uninstall removes exactly that plus the launcher.
@@ -39,8 +41,13 @@ models, HF cache. Uninstall removes exactly that plus the launcher.
 import argparse
 import json
 import os
+import plistlib
 import shutil
+import socket
+import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 from . import ui
@@ -60,6 +67,7 @@ DEFAULTS = {
     "prompt_cache": True,
     "thinking": "auto",
     "chat_tools": False,
+    "service_model": "",
 }
 def _bool(v):
     if v.lower() in ("1", "true", "on", "yes"):
@@ -73,8 +81,10 @@ KEY_TYPES = {
     "port": int, "host": str, "models_dir": str, "max_queued": int,
     "max_tokens_cap": int, "memory_limit_gb": float, "cache_limit_gb": float,
     "gen_timeout_s": int, "max_prompt_tokens": int, "prompt_cache": _bool,
-    "thinking": str, "chat_tools": _bool,
+    "thinking": str, "chat_tools": _bool, "service_model": str,
 }
+
+SERVICE_LABEL = "com.mlxh.serve"
 
 
 def load_config():
@@ -490,6 +500,171 @@ def cmd_status(args):
                     for value, width in zip(values, widths)).rstrip())
 
 
+def service_plist(mlxh_bin: str, model: str, log_path: str,
+                  mlxh_home: str) -> str:
+    """Return a launchd plist for the persistent localhost server."""
+    data = {
+        "Label": SERVICE_LABEL,
+        "ProgramArguments": [mlxh_bin, "serve", model, "--host", "127.0.0.1"],
+        "KeepAlive": True,
+        "ThrottleInterval": 60,
+        "EnvironmentVariables": {
+            "PATH": f"{Path(mlxh_bin).parent}:/usr/bin:/bin:/usr/sbin:/sbin",
+            "MLXH_HOME": mlxh_home,
+        },
+        "StandardOutPath": log_path,
+        "StandardErrorPath": log_path,
+    }
+    return plistlib.dumps(data, fmt=plistlib.FMT_XML).decode()
+
+
+def _service_plist_path():
+    return Path.home() / "Library" / "LaunchAgents" / f"{SERVICE_LABEL}.plist"
+
+
+def _service_target():
+    return f"gui/{os.getuid()}/{SERVICE_LABEL}"
+
+
+def _launchctl_result(*args):
+    try:
+        return subprocess.run(
+            ["launchctl", *args], capture_output=True, text=True, check=False
+        )
+    except OSError as exc:
+        ui.fail("could not run launchctl", str(exc))
+
+
+def _missing_service(result):
+    message = f"{result.stdout}\n{result.stderr}".lower()
+    return any(text in message for text in (
+        "could not find service", "service not found", "no such process"
+    ))
+
+
+def _service_loaded():
+    result = _launchctl_result("print", _service_target())
+    if result.returncode == 0:
+        return True
+    if _missing_service(result):
+        return False
+    ui.fail("could not inspect the mlxh service",
+            result.stderr.strip() or result.stdout.strip())
+
+
+def _launchctl(*args):
+    result = _launchctl_result(*args)
+    if result.returncode:
+        ui.fail(f"launchctl {' '.join(args)} failed",
+                result.stderr.strip() or result.stdout.strip())
+
+
+def _port_in_use(port):
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+            return True
+    except OSError:
+        return False
+
+
+def _wait_for_port_release(port, timeout=3.0):
+    deadline = time.monotonic() + timeout
+    while _port_in_use(port):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.1)
+    return True
+
+
+def _write_service_plist(path, contents):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(temporary)
+    try:
+        with os.fdopen(fd, "w") as file:
+            file.write(contents)
+        temporary.chmod(0o644)
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _service_install(dry_run=False):
+    if "MLXH_MODELS_DIR" in os.environ:
+        ui.fail("MLXH_MODELS_DIR cannot be used by the login service",
+                hint="persist it with `mlxh config models_dir PATH`, then retry")
+    cfg = load_config()
+    model = cfg["service_model"]
+    if not model:
+        ui.fail("service_model is not configured",
+                hint="run `mlxh config service_model MODEL` first")
+    resolve(cfg, model)
+    launcher = shutil.which("mlxh")
+    if not launcher:
+        ui.fail("could not find the mlxh launcher on PATH")
+    launcher = str(Path(launcher).expanduser().resolve())
+    mlxh_home = str(HOME.expanduser().resolve())
+    path = _service_plist_path()
+    contents = service_plist(
+        launcher, model, str(Path(mlxh_home) / "service.log"), mlxh_home
+    )
+
+    if dry_run:
+        print(contents, end="")
+        if path.exists():
+            print(f"launchctl bootout {_service_target()}")
+        print(f"launchctl bootstrap gui/{os.getuid()} {path}")
+        return
+
+    loaded = _service_loaded()
+    port = cfg["port"]
+    if loaded:
+        _launchctl("bootout", _service_target())
+        if not _wait_for_port_release(port):
+            ui.fail(f"port {port} is still in use after stopping the service",
+                    hint="stop the process using it, then retry")
+    elif _port_in_use(port):
+        ui.fail(f"port {port} is already in use",
+                hint="stop the existing server, then retry")
+
+    _write_service_plist(path, contents)
+    _launchctl("bootstrap", f"gui/{os.getuid()}", str(path))
+    ui.ok(f"installed {SERVICE_LABEL} for model '{model}'")
+    ui.note(f"logs append to {Path(mlxh_home) / 'service.log'}")
+
+
+def _service_uninstall(dry_run=False):
+    path = _service_plist_path()
+    if dry_run:
+        if path.exists():
+            print(f"launchctl bootout {_service_target()}")
+        print(f"rm {path}")
+        return
+    loaded = _service_loaded()
+    if loaded:
+        _launchctl("bootout", _service_target())
+    path.unlink(missing_ok=True)
+    ui.ok(f"removed {SERVICE_LABEL}")
+
+
+def _service_restart(dry_run=False):
+    command = ("kickstart", "-k", _service_target())
+    if dry_run:
+        print(f"launchctl {' '.join(command)}")
+        return
+    _launchctl(*command)
+    ui.ok(f"restarted {SERVICE_LABEL}")
+
+
+def cmd_service(args):
+    if args.action == "install":
+        _service_install(args.dry_run)
+    elif args.action == "uninstall":
+        _service_uninstall(args.dry_run)
+    else:
+        _service_restart(args.dry_run)
+
+
 def _chat_args(cfg, rest):
     if cfg["chat_tools"] and "--tools" not in rest and "--no-tools" not in rest:
         rest = ["--tools", *rest]
@@ -752,6 +927,9 @@ def cmd_uninstall(args):
         if reply != "yes":
             sys.exit("aborted")
     launcher = os.environ.get("MLXH_LAUNCHER")
+    if _service_plist_path().exists():
+        _service_uninstall()
+        ui.note("stopped and removed the login service")
     shutil.rmtree(HOME, ignore_errors=True)
     if launcher and Path(launcher).is_file():
         Path(launcher).unlink()
@@ -821,6 +999,12 @@ def main():
         help="emit JSON (use set -o pipefail when piping to another command)",
     )
     p.set_defaults(fn=cmd_status)
+
+    p = sub.add_parser("service", help="manage the persistent login server")
+    p.add_argument("action", choices=["install", "uninstall", "restart"])
+    p.add_argument("--dry-run", action="store_true",
+                   help="print the plist and launchctl commands without changes")
+    p.set_defaults(fn=cmd_service)
 
     p = sub.add_parser("launch", help="launch a coding agent (claude, codex, pi) on a local model")
     p.add_argument("agent", help="claude, codex, or pi")
