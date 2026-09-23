@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **Chat input**: multiline terminal pastes remain one editable message and
+  wait for an explicit Enter before generation starts.
+
 ## v0.1.1 — 2026-09-23
 
 - **Live diagnostics**: `GET /mlxh/info` now reports MLX memory, process

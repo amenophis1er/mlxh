@@ -17,6 +17,49 @@ from .toolcalls import load_user_tools, parse_tool_calls, run_tool
 MAX_TOOL_ROUNDS = 5
 
 
+def _chat_session(history_path, commands, input=None, output=None):
+    """Build the interactive editor; bracketed pastes stay one editable input."""
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.completion import Completer, Completion
+    from prompt_toolkit.history import FileHistory
+
+    class CompatibleFileHistory(FileHistory):
+        """Read legacy readline lines plus prompt_toolkit multiline entries."""
+
+        def load_history_strings(self):
+            strings, entry = [], []
+            if Path(self.filename).is_file():
+                for line in Path(self.filename).read_text(errors="replace").splitlines():
+                    if line.startswith("+"):
+                        entry.append(line[1:])
+                    else:
+                        if entry:
+                            strings.append("\n".join(entry))
+                            entry = []
+                        if line and not line.startswith("# "):
+                            strings.append(line)
+                if entry:
+                    strings.append("\n".join(entry))
+            return reversed(strings[-500:])
+
+    class SlashCompleter(Completer):
+        def get_completions(self, document, complete_event):
+            text = document.text_before_cursor
+            if not text.startswith("/") or " " in text:
+                return
+            for command in commands:
+                if command.startswith(text):
+                    yield Completion(command, start_position=-len(text))
+
+    return PromptSession(
+        history=CompatibleFileHistory(str(history_path)),
+        completer=SlashCompleter(),
+        complete_while_typing=False,
+        input=input,
+        output=output,
+    )
+
+
 def generate_once(runner, messages, images, max_tokens, specs, thinking=None):
     """One generation pass; streams visible text, hides tool-call XML."""
     prompt = runner.template(messages, num_images=len(images), tools=specs,
@@ -120,41 +163,14 @@ def main():
         ask(runner, messages, args.image, args.max_tokens, tools, thinking=thinking)
         return
 
-    prompt_ansi = False
-    try:
-        import atexit
-        import readline
-        hist = Path(os.environ.get("MLXH_HOME", Path.home() / ".mlxh")) / "chat_history"
-        hist.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            readline.read_history_file(hist)
-        except OSError:
-            pass
-        readline.set_history_length(500)
-        atexit.register(lambda: readline.write_history_file(hist))
-
-        # Tab-complete the slash commands. Without a completer, a Tab on a
-        # partial word (e.g. "/exi<Tab>") runs the default filename completion,
-        # which inserts stray whitespace and dirties the line.
-        cmds = ["/exit", "/reset", "/help", "/bye", "/quit"]
-        if runner.supports_images:
-            cmds.insert(0, "/image ")
-
-        def completer(text, state):
-            hits = [c for c in cmds if c.startswith(text)] if text.startswith("/") else []
-            return hits[state] if state < len(hits) else None
-
-        readline.set_completer(completer)
-        readline.set_completer_delims(" \t\n")  # treat "/exit" as one word
-        is_gnu = "libedit" not in (readline.__doc__ or "")
-        readline.parse_and_bind("tab: complete" if is_gnu else "bind ^I rl_complete")
-        # The \001/\002 non-printing markers are GNU-readline-only; under
-        # macOS libedit they corrupt input accounting, so colorize the prompt
-        # only on real GNU readline.
-        prompt_ansi = (is_gnu and sys.stdin.isatty() and sys.stdout.isatty()
-                       and not os.environ.get("NO_COLOR"))
-    except ImportError:
-        pass
+    hist = Path(os.environ.get("MLXH_HOME", Path.home() / ".mlxh")) / "chat_history"
+    hist.parent.mkdir(parents=True, exist_ok=True)
+    cmds = ["/exit", "/reset", "/help", "/bye", "/quit"]
+    if runner.supports_images:
+        cmds.insert(0, "/image ")
+    session = _chat_session(hist, cmds)
+    prompt_ansi = (sys.stdin.isatty() and sys.stdout.isatty()
+                   and not os.environ.get("NO_COLOR"))
 
     hint = "/image <path> attaches an image, " if runner.supports_images else ""
     print(f"Interactive chat. {hint}/reset clears history, /exit quits, /help lists commands.",
@@ -163,12 +179,11 @@ def main():
     while True:
         tag = f" [{len(staged)} img]" if staged else ""
         if prompt_ansi:
-            # \001/\002 tell readline the ANSI codes take no screen width
-            prompt = f"\n\001\x1b[1;36m\002you{tag}>\001\x1b[0m\002 "
+            prompt = [("", "\n"), ("bold ansicyan", f"you{tag}> ")]
         else:
             prompt = f"\nyou{tag}> "
         try:
-            user = input(prompt).strip()
+            user = session.prompt(prompt, prompt_continuation="... ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
