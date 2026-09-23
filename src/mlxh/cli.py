@@ -8,6 +8,7 @@ Commands:
   mlxh mv <name> <new-name>           rename a model
   mlxh rm <name>                      remove a model (links: symlink only)
   mlxh serve <name> [--port N ...]    OpenAI + Anthropic compatible API server
+  mlxh status [--json]                show live stats of the local server
   mlxh launch <agent> [--model NAME]  run a coding agent (claude, codex, pi)
   mlxh chat <name> [chat args...]     terminal chat (tools, images, streaming)
   mlxh config [key [value]]           show or set config
@@ -405,6 +406,90 @@ def cmd_serve(args):
     os.execv(sys.executable, serve_argv(cfg, name, path, overrides))
 
 
+def _fetch_info(port):
+    """Fetch one diagnostics snapshot from the local server."""
+    import urllib.request
+
+    with urllib.request.urlopen(
+        f"http://127.0.0.1:{port}/mlxh/info", timeout=2
+    ) as response:
+        data = json.loads(response.read())
+    if not isinstance(data, dict):
+        raise ValueError("/mlxh/info did not return an object")
+    return data
+
+
+def _human_value(value, formatter=str):
+    return "—" if value is None else formatter(value)
+
+
+def _format_uptime(value):
+    value = int(value)
+    if value < 60:
+        return f"{value}s"
+    if value < 3600:
+        return f"{value // 60}m"
+    return f"{value // 3600}h"
+
+
+def _format_tokens(value):
+    value = int(value)
+    if value < 1000:
+        return str(value)
+    scaled = value / 1000
+    return f"{scaled:.1f}k" if scaled < 100 else f"{scaled:.0f}k"
+
+
+def _format_gb(value):
+    return f"{int(value) / 1e9:.1f} GB"
+
+
+def cmd_status(args):
+    port = load_config()["port"]
+    try:
+        info = _fetch_info(port)
+    except Exception:
+        print(f"no mlxh server running on 127.0.0.1:{port}", file=sys.stderr)
+        raise SystemExit(1)
+
+    if args.json:
+        print(json.dumps({**info, "port": port}, indent=2))
+        return
+
+    runtime = info.get("runtime") or {}
+    mlx = info.get("mlx") or {}
+    ready_value = runtime.get("ready")
+    if ready_value is None:
+        state = "—"
+    elif not ready_value:
+        state = "LOADING"
+    elif runtime.get("busy"):
+        state = "BUSY"
+    else:
+        state = "IDLE"
+    values = [
+        _human_value(info.get("model")),
+        _human_value(runtime.get("pid")),
+        _human_value(runtime.get("uptime_s"), _format_uptime),
+        state,
+        _human_value(runtime.get("queue_depth")),
+        _human_value(runtime.get("requests")),
+        _human_value(runtime.get("prompt_tokens"), _format_tokens),
+        _human_value(runtime.get("tokens_generated"), _format_tokens),
+        _human_value(mlx.get("active_memory_bytes"), _format_gb),
+        _human_value(mlx.get("cache_memory_bytes"), _format_gb),
+        _human_value(mlx.get("last_peak_memory_bytes"), _format_gb),
+    ]
+    headers = ["MODEL", "PID", "UPTIME", "STATE", "QUEUE", "REQ",
+               "PROMPT", "OUTPUT", "ACTIVE", "CACHE", "PEAK"]
+    widths = [max(len(header), len(str(value)))
+              for header, value in zip(headers, values)]
+    print(ui.dim("  ".join(f"{header:{width}}"
+                           for header, width in zip(headers, widths))))
+    print("  ".join(f"{value:{width}}"
+                    for value, width in zip(values, widths)).rstrip())
+
+
 def _chat_args(cfg, rest):
     if cfg["chat_tools"] and "--tools" not in rest and "--no-tools" not in rest:
         rest = ["--tools", *rest]
@@ -729,6 +814,13 @@ def main():
     p.add_argument("--prompt-cache", dest="prompt_cache")
     p.add_argument("--thinking", choices=["auto", "on", "off"], dest="thinking")
     p.set_defaults(fn=cmd_serve)
+
+    p = sub.add_parser("status", help="show live stats of the running server")
+    p.add_argument(
+        "--json", action="store_true",
+        help="emit JSON (use set -o pipefail when piping to another command)",
+    )
+    p.set_defaults(fn=cmd_status)
 
     p = sub.add_parser("launch", help="launch a coding agent (claude, codex, pi) on a local model")
     p.add_argument("agent", help="claude, codex, or pi")

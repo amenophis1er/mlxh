@@ -6,9 +6,10 @@ Invoked by `mlxh serve <model>`; can also run standalone:
 
 import argparse
 import base64
-import os
 import binascii
+import importlib.metadata
 import json
+import os
 import queue
 import tempfile
 import threading
@@ -37,6 +38,30 @@ SETTINGS = {
     "prompt_cache": True,   # reuse KV blocks across requests (agents: huge TTFT win)
     "thinking": "auto",     # reasoning mode: auto (model default) / on / off
 }
+_STARTED = time.monotonic()
+_stats = {
+    "requests": 0,
+    "tokens_generated": 0,
+    "prompt_tokens": 0,
+    "last_peak_memory_bytes": None,
+    "busy": False,
+}
+_stats_lock = threading.Lock()
+
+
+def _bump(key, n=1):
+    with _stats_lock:
+        _stats[key] += n
+
+
+def _add(key, n):
+    with _stats_lock:
+        _stats[key] += n
+
+
+def _set(key, value):
+    with _stats_lock:
+        _stats[key] = value
 
 # All MLX work (model load AND generation) happens on one dedicated thread —
 # MLX streams are per-thread state, so generating from FastAPI's threadpool
@@ -70,12 +95,17 @@ def gen_worker(model_path):
     t0 = time.perf_counter()
     try:
         runner = load_runner(model_path)
-    except RuntimeError as e:
+    except Exception as e:
         print(e, flush=True)
         os._exit(1)
     if SETTINGS["prompt_cache"] and getattr(runner, "supports_cache", False):
         runner.enable_cache()
         print("[apc] prompt cache enabled (65k-token block pool)", flush=True)
+    try:
+        _set("last_peak_memory_bytes", mx.get_peak_memory())
+        mx.reset_peak_memory()
+    except Exception as stats_err:
+        print(f"[mlx] stats error: {stats_err}", flush=True)
     print(f"Ready in {time.perf_counter() - t0:.1f}s "
           f"(images: {'yes' if runner.supports_images else 'no'})", flush=True)
     ready.set()
@@ -83,9 +113,13 @@ def gen_worker(model_path):
     while True:
         job = jobs.get()
         out = job["out"]
+        last = None
+        stream = run_generation(job["body"])
+        _set("busy", True)
         try:
             t0 = time.perf_counter()
-            for resp in run_generation(job["body"]):
+            for resp in stream:
+                last = resp
                 out.put(resp)
                 if timeout and time.perf_counter() - t0 > timeout:
                     print(f"[gen] timeout after {timeout}s, stopping", flush=True)
@@ -93,6 +127,21 @@ def gen_worker(model_path):
             out.put(None)
         except BaseException as e:
             out.put(e)
+        finally:
+            try:
+                stream.close()
+            finally:
+                _set("busy", False)
+                try:
+                    with _stats_lock:
+                        _stats["last_peak_memory_bytes"] = mx.get_peak_memory()
+                        _stats["tokens_generated"] += (
+                            last.generation_tokens if last else 0
+                        )
+                        _stats["prompt_tokens"] += last.prompt_tokens if last else 0
+                    mx.reset_peak_memory()
+                except Exception as stats_err:
+                    print(f"[mlx] stats error: {stats_err}", flush=True)
 
 
 def submit(body):
@@ -102,6 +151,7 @@ def submit(body):
     if jobs.qsize() >= SETTINGS["max_queued"]:
         raise HTTPException(503, "Server busy: too many queued generations")
     out = queue.Queue()
+    _bump("requests")
     jobs.put({"body": body, "out": out})
     return out
 
@@ -435,8 +485,40 @@ def anthropic_count_tokens(body: dict):
 
 @app.get("/mlxh/info")
 def info():
-    """Settings of THIS server process — config edits only apply to new servers."""
-    return {"model": MODEL_ID, "settings": SETTINGS}
+    """Configuration and live diagnostics for this server process."""
+    with _stats_lock:
+        stats = dict(_stats)
+    try:
+        import mlx.core as mx
+        mlx_stats = {
+            "active_memory_bytes": int(mx.get_active_memory()),
+            "cache_memory_bytes": int(mx.get_cache_memory()),
+            "last_peak_memory_bytes": stats["last_peak_memory_bytes"],
+        }
+        mlx_version = importlib.metadata.version("mlx")
+    except Exception:
+        mlx_stats = {
+            "active_memory_bytes": None,
+            "cache_memory_bytes": None,
+            "last_peak_memory_bytes": None,
+        }
+        mlx_version = None
+    return {
+        "model": MODEL_ID,
+        "settings": SETTINGS,
+        "mlx": mlx_stats,
+        "runtime": {
+            "uptime_s": int(time.monotonic() - _STARTED),
+            "pid": os.getpid(),
+            "ready": ready.is_set(),
+            "busy": stats["busy"],
+            "queue_depth": jobs.qsize(),
+            "requests": stats["requests"],
+            "prompt_tokens": stats["prompt_tokens"],
+            "tokens_generated": stats["tokens_generated"],
+            "mlx_version": mlx_version,
+        },
+    }
 
 
 @app.get("/v1/models")

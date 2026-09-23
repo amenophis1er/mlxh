@@ -88,6 +88,9 @@ Set persistently with `mlxh config <key> <value>`, or per run with
 | `prompt_cache` | true | reuse KV blocks across requests — same-prefix follow-ups skip reprocessing (agents: 4-20x faster TTFT) |
 | `thinking` | auto | model reasoning: `auto` (model default), `on`, `off` |
 
+`mlxh status` shows live memory, queue, traffic, and process statistics for
+the local server; use `mlxh status --json` for scripts.
+
 The last two exist because long contexts are a real hazard on unified memory:
 KV cache grows with prompt length, and an unbounded 30k-token request can
 exhaust RAM and freeze the whole machine. The server fails a request rather

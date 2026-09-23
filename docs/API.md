@@ -136,13 +136,41 @@ enough for context budgeting, not exact.
 
 ### GET /mlxh/info
 
-```json
-{"model": "gemma4-12b", "settings": {"max_queued": 4, "max_tokens_cap": 16384, …}}
+```bash
+curl -s http://127.0.0.1:1060/mlxh/info | jq .
 ```
 
-The live settings of *this server process* — config edits after startup are
-not reflected until restart (`mlxh launch` uses this to warn about stale
-servers).
+Returns the configuration and live diagnostics of this local server process:
+
+```json
+{
+  "model": "bonsai2",
+  "settings": {"max_queued": 4, "max_tokens_cap": 16384},
+  "mlx": {
+    "active_memory_bytes": 13200000000,
+    "cache_memory_bytes": 1200000000,
+    "last_peak_memory_bytes": 13900000000
+  },
+  "runtime": {
+    "uptime_s": 3601,
+    "pid": 12345,
+    "ready": true,
+    "busy": false,
+    "queue_depth": 0,
+    "requests": 42,
+    "prompt_tokens": 98304,
+    "tokens_generated": 183456,
+    "mlx_version": "0.32.0"
+  }
+}
+```
+
+Memory values are exact byte counts. `queue_depth` counts pending work, not the
+active generation; `busy` reports that separately. `last_peak_memory_bytes` is
+the stable peak snapshot from the last finished generation attempt (or model
+load before the first request). Config edits after startup are not reflected
+until restart. `mlxh status` presents this endpoint as a table and `mlxh status
+--json` adds the locally discovered `port` to the payload.
 
 ## Not implemented
 
