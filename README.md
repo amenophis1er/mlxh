@@ -103,7 +103,12 @@ The API supports `/v1/chat/completions` (streaming + non-streaming),
 `/v1/models`, tool calling (OpenAI `tools` in, `tool_calls` out), and vision
 via `image_url` parts (base64 data URLs or local paths). Point any OpenAI
 client at `http://localhost:1060/v1` (the default port: MLX is the Roman
-numeral for 1060) with any API key.
+numeral for 1060) with any API key:
+
+```bash
+curl http://localhost:1060/v1/chat/completions -H "Content-Type: application/json" \
+  -d '{"model":"bonsai2","messages":[{"role":"user","content":"hi"}],"max_tokens":100}'
+```
 
 The server also speaks the **Anthropic Messages API** (`/v1/messages`,
 streaming with keepalive pings, tool use, images, `count_tokens`), which is
