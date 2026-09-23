@@ -102,6 +102,17 @@ def test_pasted_image_path_becomes_an_attachment_anywhere(tmp_path, monkeypatch)
     assert prompt == "What is this?"
     assert images == [str(image)]
 
+    simple_image = tmp_path / "clipboard.png"
+    simple_image.write_bytes(b"image")
+    prompt, images = chat_cli._extract_image_paths(f"What's this? {simple_image}")
+    assert prompt == "What's this?"
+    assert images == [str(simple_image)]
+
+    escaped = str(image).replace(" ", r"\ ")
+    prompt, images = chat_cli._extract_image_paths(f"Explain {escaped}")
+    assert prompt == "Explain"
+    assert images == [str(image)]
+
     prompt, images = chat_cli._extract_image_paths("Explain /tmp/missing.png")
     assert prompt == "Explain /tmp/missing.png"
     assert images == []

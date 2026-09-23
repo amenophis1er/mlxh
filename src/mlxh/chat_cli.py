@@ -8,6 +8,7 @@ import argparse
 import atexit
 import json
 import os
+import re
 import shlex
 import sys
 import tempfile
@@ -20,6 +21,15 @@ from .toolcalls import load_user_tools, parse_tool_calls, run_tool
 
 MAX_TOOL_ROUNDS = 5
 MAX_IMAGE_DOWNLOAD = 25 * 1024 * 1024
+_PASTED_TOKEN = re.compile(r'''(?x)
+    (?<!\S)
+    (?:
+        "(?:\\.|[^"])*"
+      | '(?:\\.|[^'])*'
+      | (?:\\.|[^\s])+
+    )
+    (?=\s|$)
+''')
 
 
 def _validate_image(path):
@@ -140,25 +150,29 @@ def _prepare_image(source=None):
 
 def _extract_image_paths(text):
     """Turn pasted/dragged local image paths into attachments."""
-    try:
-        parts = shlex.split(text)
-    except ValueError:
-        return text, []
-    images, remaining = [], []
-    for part in parts:
-        path = Path(part).expanduser()
+    images, spans = [], []
+    for match in _PASTED_TOKEN.finditer(text):
+        token = match.group()
+        if len(token) >= 2 and token[0] == token[-1] and token[0] in "\"'":
+            token = token[1:-1]
+        token = re.sub(r"\\(.)", r"\1", token)
+        path = Path(token).expanduser()
         if not path.is_file():
-            remaining.append(part)
             continue
         try:
             _validate_image(path)
         except ValueError:
-            remaining.append(part)
             continue
         images.append(str(path))
+        spans.append(match.span())
     if not images:
         return text, []
-    return " ".join(remaining), images
+    remaining = text
+    for start, end in reversed(spans):
+        remaining = remaining[:start] + remaining[end:]
+    remaining = re.sub(r"[ \t]+", " ", remaining)
+    remaining = re.sub(r" *\n *", "\n", remaining).strip()
+    return remaining, images
 
 
 def _cleanup_images(paths):
