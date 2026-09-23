@@ -5,16 +5,143 @@ Invoked by `mlxh chat <model>`; also standalone:
 """
 
 import argparse
+import atexit
 import json
 import os
+import shlex
 import sys
+import tempfile
 from pathlib import Path
+from urllib.parse import urlparse
 
 from . import ui
 from .loader import load_runner
 from .toolcalls import load_user_tools, parse_tool_calls, run_tool
 
 MAX_TOOL_ROUNDS = 5
+MAX_IMAGE_DOWNLOAD = 25 * 1024 * 1024
+
+
+def _validate_image(path):
+    try:
+        from PIL import Image
+        with Image.open(path) as image:
+            image.verify()
+    except Exception as exc:
+        raise ValueError(f"not a readable image: {exc}") from None
+
+
+def _download_image(url):
+    import urllib.request
+
+    request = urllib.request.Request(url, headers={"User-Agent": "mlxh/0.1"})
+    try:
+        response = urllib.request.urlopen(request, timeout=15)
+    except Exception as exc:
+        raise ValueError(f"could not download image: {exc}") from None
+    path = None
+    try:
+        final_url = response.geturl()
+        if urlparse(final_url).scheme not in ("http", "https"):
+            raise ValueError("image redirects must stay on HTTP or HTTPS")
+        content_type = response.headers.get("Content-Type", "").split(";", 1)[0]
+        if not content_type.startswith("image/"):
+            raise ValueError(f"URL returned {content_type or 'unknown content type'}, not an image")
+        length = response.headers.get("Content-Length")
+        if length and int(length) > MAX_IMAGE_DOWNLOAD:
+            raise ValueError("image is larger than the 25 MB download limit")
+        suffix = {
+            "image/gif": ".gif", "image/jpeg": ".jpg", "image/png": ".png",
+            "image/tiff": ".tiff", "image/webp": ".webp",
+        }.get(content_type, ".img")
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as file:
+            path = Path(file.name)
+            total = 0
+            while chunk := response.read(64 * 1024):
+                total += len(chunk)
+                if total > MAX_IMAGE_DOWNLOAD:
+                    raise ValueError("image is larger than the 25 MB download limit")
+                file.write(chunk)
+        _validate_image(path)
+        return str(path)
+    except Exception:
+        if path:
+            path.unlink(missing_ok=True)
+        raise
+    finally:
+        response.close()
+
+
+def _clipboard_image():
+    import subprocess
+
+    attempts = (("«class PNGf»", ".png"), ("TIFF picture", ".tiff"))
+    last_error = "clipboard does not contain an image"
+    for clipboard_type, suffix in attempts:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as file:
+            path = Path(file.name)
+        script = f"""
+on run argv
+    set imageData to the clipboard as {clipboard_type}
+    set outputFile to open for access POSIX file (item 1 of argv) with write permission
+    try
+        set eof outputFile to 0
+        write imageData to outputFile
+        close access outputFile
+    on error message
+        try
+            close access outputFile
+        end try
+        error message
+    end try
+end run
+"""
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", script, str(path)],
+                capture_output=True, text=True, check=False,
+            )
+        except OSError as exc:
+            path.unlink(missing_ok=True)
+            raise ValueError(f"could not read the clipboard: {exc}") from None
+        if result.returncode == 0:
+            try:
+                _validate_image(path)
+                return str(path)
+            except ValueError as exc:
+                last_error = str(exc)
+        else:
+            last_error = result.stderr.strip() or last_error
+        path.unlink(missing_ok=True)
+    raise ValueError(f"could not read an image from the clipboard: {last_error}")
+
+
+def _prepare_image(source=None):
+    """Return (local path, is_temporary) for clipboard, URL, or file input."""
+    if not source:
+        return _clipboard_image(), True
+    parsed = urlparse(source)
+    if parsed.scheme in ("http", "https"):
+        return _download_image(source), True
+    if parsed.scheme:
+        raise ValueError("image URL must use HTTP or HTTPS")
+    try:
+        parts = shlex.split(source)
+        if len(parts) == 1:
+            source = parts[0]
+    except ValueError:
+        pass
+    path = Path(source).expanduser()
+    if not path.is_file():
+        raise ValueError(f"no such file: {path}")
+    _validate_image(path)
+    return str(path), False
+
+
+def _cleanup_images(paths):
+    for path in tuple(paths):
+        Path(path).unlink(missing_ok=True)
+        paths.discard(path)
 
 
 def _chat_session(history_path, commands, input=None, output=None):
@@ -126,7 +253,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model-path", required=True)
     ap.add_argument("-p", "--prompt", help="one-shot prompt (omit for interactive chat)")
-    ap.add_argument("-i", "--image", action="append", default=[], help="image file to include")
+    ap.add_argument("-i", "--image", action="append", default=[],
+                    help="local image path or HTTP(S) image URL to include")
     ap.add_argument("--max-tokens", type=int, default=1024)
     ap.add_argument("--tools", action="store_true",
                     help="enable built-in tools (weather, time, calculator)")
@@ -158,9 +286,25 @@ def main():
         print(f"Tools ({tools_path.name}): {', '.join(registry)}", file=sys.stderr)
         tools = (registry, specs)
 
+    temporary_images = set()
+    atexit.register(_cleanup_images, temporary_images)
+
     if args.prompt:
+        images = []
+        try:
+            for source in args.image:
+                path, temporary = _prepare_image(source)
+                images.append(path)
+                if temporary:
+                    temporary_images.add(path)
+        except ValueError as exc:
+            _cleanup_images(temporary_images)
+            sys.exit(f"--image: {exc}")
         messages = [{"role": "user", "content": args.prompt}]
-        ask(runner, messages, args.image, args.max_tokens, tools, thinking=thinking)
+        try:
+            ask(runner, messages, images, args.max_tokens, tools, thinking=thinking)
+        finally:
+            _cleanup_images(temporary_images)
         return
 
     hist = Path(os.environ.get("MLXH_HOME", Path.home() / ".mlxh")) / "chat_history"
@@ -172,7 +316,8 @@ def main():
     prompt_ansi = (sys.stdin.isatty() and sys.stdout.isatty()
                    and not os.environ.get("NO_COLOR"))
 
-    hint = "/image <path> attaches an image, " if runner.supports_images else ""
+    hint = "/image [path|URL] attaches an image (no argument: clipboard), " \
+        if runner.supports_images else ""
     print(f"Interactive chat. {hint}/reset clears history, /exit quits, /help lists commands.",
           file=sys.stderr)
     history, staged = [], []
@@ -192,32 +337,45 @@ def main():
         if user in ("/exit", "/bye", "/quit"):
             break
         if user == "/help":
-            print("/image <path>  attach an image to your next message\n"
+            image_help = (
+                "/image [path|URL]  attach a file, URL, or clipboard image\n"
+                if runner.supports_images else ""
+            )
+            print(image_help +
                   "/reset         clear conversation history\n"
                   "/exit          quit (also /bye, /quit, Ctrl-D)", file=sys.stderr)
             continue
         if user == "/reset":
+            _cleanup_images(temporary_images)
             history, staged = [], []
             print("(history cleared)", file=sys.stderr)
             continue
-        if user.startswith("/image"):
+        if user == "/image" or user.startswith("/image "):
             if not runner.supports_images:
                 print("(this model does not support images)", file=sys.stderr)
                 continue
-            path = Path(user[len("/image"):].strip()).expanduser()
-            if not path.name:
-                print("usage: /image <path-to-image>", file=sys.stderr)
-            elif not path.is_file():
-                print(f"(no such file: {path})", file=sys.stderr)
-            else:
-                staged.append(str(path))
-                print(f"(attached {path.name} — will be sent with your next message)",
-                      file=sys.stderr)
+            source = user[len("/image"):].strip() or None
+            try:
+                path, temporary = _prepare_image(source)
+            except ValueError as exc:
+                print(f"({exc})", file=sys.stderr)
+                continue
+            staged.append(path)
+            if temporary:
+                temporary_images.add(path)
+            label = "clipboard image" if source is None else source
+            print(f"(attached {label} — will be sent with your next message)",
+                  file=sys.stderr)
             continue
         history.append({"role": "user", "content": user})
         print()
-        ask(runner, history, staged, args.max_tokens, tools, thinking=thinking)
+        try:
+            ask(runner, history, staged, args.max_tokens, tools, thinking=thinking)
+        finally:
+            _cleanup_images(temporary_images)
         staged = []
+
+    _cleanup_images(temporary_images)
 
 
 if __name__ == "__main__":

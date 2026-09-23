@@ -156,6 +156,21 @@ Practical notes:
 - Model advice: a 12B-class stock model works well; heavily-compressed
   large models (Bonsai) are slow at agent-scale contexts.
 
+## Chat images
+
+Vision models accept local files, web images, and the macOS image clipboard:
+
+```text
+/image ~/Desktop/screenshot.png
+/image https://example.com/diagram.png
+/image
+```
+
+The no-argument form reads the current clipboard image. Terminals do not pass
+binary clipboard contents through ordinary Cmd-V, so this explicit command is
+used instead. URL downloads are limited to 25 MB, validated as images, and—like
+clipboard captures—removed after the next message is processed.
+
 ## Chat tools
 
 mlxh ships **no tools** — by default the chat is a plain model REPL. To give
