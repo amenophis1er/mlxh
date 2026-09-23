@@ -82,10 +82,7 @@ def test_service_dry_run_has_no_mutation(service_env, monkeypatch, capsys):
     _home, plist = service_env
     plist.parent.mkdir(parents=True)
     plist.write_text("existing")
-    monkeypatch.setattr(
-        cli, "_service_loaded",
-        lambda: pytest.fail("dry-run inspected launchd"),
-    )
+    monkeypatch.setattr(cli, "_service_loaded", lambda: True)
     monkeypatch.setattr(
         cli, "_write_service_plist",
         lambda *_args: pytest.fail("dry-run wrote a plist"),
@@ -99,6 +96,19 @@ def test_service_dry_run_has_no_mutation(service_env, monkeypatch, capsys):
     assert f"launchctl bootout {cli._service_target()}" in out
     assert f"launchctl bootstrap gui/{os.getuid()} {plist}" in out
     assert plist.read_text() == "existing"
+
+
+def test_service_prefers_exported_launcher(service_env, monkeypatch, capsys):
+    _home, _plist = service_env
+    launcher = "/custom/bin/mlxh"
+    monkeypatch.setenv("MLXH_LAUNCHER", launcher)
+    monkeypatch.setattr(
+        cli.shutil, "which", lambda _name: pytest.fail("PATH lookup was used")
+    )
+    monkeypatch.setattr(cli, "_service_loaded", lambda: False)
+    cli._service_install(dry_run=True)
+    data = plistlib.loads(capsys.readouterr().out.split("launchctl", 1)[0].encode())
+    assert data["ProgramArguments"][0] == launcher
 
 
 def test_service_initial_install(service_env, monkeypatch):

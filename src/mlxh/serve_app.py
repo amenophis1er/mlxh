@@ -11,9 +11,11 @@ import importlib.metadata
 import json
 import os
 import queue
+import sys
 import tempfile
 import threading
 import time
+import traceback
 import uuid
 from pathlib import Path
 
@@ -54,11 +56,6 @@ def _bump(key, n=1):
         _stats[key] += n
 
 
-def _add(key, n):
-    with _stats_lock:
-        _stats[key] += n
-
-
 def _set(key, value):
     with _stats_lock:
         _stats[key] = value
@@ -95,8 +92,9 @@ def gen_worker(model_path):
     t0 = time.perf_counter()
     try:
         runner = load_runner(model_path)
-    except Exception as e:
-        print(e, flush=True)
+    except Exception:
+        traceback.print_exc()
+        sys.stderr.flush()
         os._exit(1)
     if SETTINGS["prompt_cache"] and getattr(runner, "supports_cache", False):
         runner.enable_cache()

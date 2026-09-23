@@ -599,7 +599,7 @@ def _service_install(dry_run=False):
         ui.fail("service_model is not configured",
                 hint="run `mlxh config service_model MODEL` first")
     resolve(cfg, model)
-    launcher = shutil.which("mlxh")
+    launcher = os.environ.get("MLXH_LAUNCHER") or shutil.which("mlxh")
     if not launcher:
         ui.fail("could not find the mlxh launcher on PATH")
     launcher = str(Path(launcher).expanduser().resolve())
@@ -608,15 +608,15 @@ def _service_install(dry_run=False):
     contents = service_plist(
         launcher, model, str(Path(mlxh_home) / "service.log"), mlxh_home
     )
+    loaded = _service_loaded()
 
     if dry_run:
         print(contents, end="")
-        if path.exists():
+        if loaded:
             print(f"launchctl bootout {_service_target()}")
         print(f"launchctl bootstrap gui/{os.getuid()} {path}")
         return
 
-    loaded = _service_loaded()
     port = cfg["port"]
     if loaded:
         _launchctl("bootout", _service_target())
@@ -635,12 +635,12 @@ def _service_install(dry_run=False):
 
 def _service_uninstall(dry_run=False):
     path = _service_plist_path()
+    loaded = _service_loaded()
     if dry_run:
-        if path.exists():
+        if loaded:
             print(f"launchctl bootout {_service_target()}")
         print(f"rm {path}")
         return
-    loaded = _service_loaded()
     if loaded:
         _launchctl("bootout", _service_target())
     path.unlink(missing_ok=True)
