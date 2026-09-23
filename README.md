@@ -175,6 +175,10 @@ mlxh recognizes the path anywhere in the prompt, so
 URL downloads are limited to 25 MB, validated as images, and—like clipboard
 captures—removed after the next message is processed.
 
+Chat responses are rendered as live Markdown in an interactive terminal,
+including headings, lists, tables, links, and fenced code blocks. Redirected
+output and `NO_COLOR` keep the model's original plain text.
+
 ## Chat tools
 
 mlxh ships **no tools** — by default the chat is a plain model REPL. To give
