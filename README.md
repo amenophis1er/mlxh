@@ -161,14 +161,15 @@ Practical notes:
 Vision models accept local files, web images, and the macOS image clipboard:
 
 ```text
+Ctrl-V
 /image ~/Desktop/screenshot.png
 /image https://example.com/diagram.png
 /image
 ```
 
-The no-argument form reads the current clipboard image. Terminals do not pass
-binary clipboard contents through ordinary Cmd-V, so this explicit command is
-used instead. If a terminal or client pastes an image as a local file path,
+Ctrl-V reads the image clipboard and inserts an editable `[Image #N]` marker;
+the no-argument `/image` form does the same without a marker. Cmd-V remains the
+terminal's normal text paste. If a terminal or client pastes an image as a local file path,
 mlxh recognizes the path anywhere in the prompt, so
 `What's this? /tmp/screenshot.png` attaches the image and sends the question.
 URL downloads are limited to 25 MB, validated as images, and—like clipboard

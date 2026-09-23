@@ -167,11 +167,13 @@ def _cleanup_images(paths):
         paths.discard(path)
 
 
-def _chat_session(history_path, commands, input=None, output=None):
+def _chat_session(history_path, commands, input=None, output=None, image_paste=None):
     """Build the interactive editor; bracketed pastes stay one editable input."""
     from prompt_toolkit import PromptSession
+    from prompt_toolkit.application import run_in_terminal
     from prompt_toolkit.completion import Completer, Completion
     from prompt_toolkit.history import FileHistory
+    from prompt_toolkit.key_binding import KeyBindings
 
     class CompatibleFileHistory(FileHistory):
         """Read legacy readline lines plus prompt_toolkit multiline entries."""
@@ -201,13 +203,37 @@ def _chat_session(history_path, commands, input=None, output=None):
                 if command.startswith(text):
                     yield Completion(command, start_position=-len(text))
 
-    return PromptSession(
+    pasted_images = []
+    bindings = KeyBindings()
+
+    if image_paste:
+        @bindings.add("c-v")
+        def paste_clipboard_image(event):
+            try:
+                path = image_paste()
+            except ValueError as exc:
+                run_in_terminal(lambda: print(f"({exc})", file=sys.stderr))
+                return
+            marker = f"[Image #{len(pasted_images) + 1}]"
+            pasted_images.append((marker, path))
+            event.current_buffer.insert_text(marker)
+
+    session = PromptSession(
         history=CompatibleFileHistory(str(history_path)),
         completer=SlashCompleter(),
         complete_while_typing=False,
+        key_bindings=bindings,
         input=input,
         output=output,
     )
+
+    def take_pasted_images():
+        result = list(pasted_images)
+        pasted_images.clear()
+        return result
+
+    session.take_pasted_images = take_pasted_images
+    return session
 
 
 def generate_once(runner, messages, images, max_tokens, specs, thinking=None):
@@ -335,11 +361,18 @@ def main():
     cmds = ["/exit", "/reset", "/help", "/bye", "/quit"]
     if runner.supports_images:
         cmds.insert(0, "/image ")
-    session = _chat_session(hist, cmds)
+    def paste_clipboard():
+        path = _clipboard_image()
+        temporary_images.add(path)
+        return path
+
+    session = _chat_session(
+        hist, cmds, image_paste=paste_clipboard if runner.supports_images else None
+    )
     prompt_ansi = (sys.stdin.isatty() and sys.stdout.isatty()
                    and not os.environ.get("NO_COLOR"))
 
-    hint = "/image [path|URL] attaches an image (no argument: clipboard), " \
+    hint = "Ctrl-V pastes a clipboard image; /image [path|URL] also attaches, " \
         if runner.supports_images else ""
     print(f"Interactive chat. {hint}/reset clears history, /exit quits, /help lists commands.",
           file=sys.stderr)
@@ -355,13 +388,27 @@ def main():
         except (EOFError, KeyboardInterrupt):
             print()
             break
+        clipboard_images = []
+        for marker, path in session.take_pasted_images():
+            if marker in user:
+                user = user.replace(marker, "", 1).strip()
+                clipboard_images.append((marker, path))
+            else:
+                Path(path).unlink(missing_ok=True)
+                temporary_images.discard(path)
+        if clipboard_images:
+            staged.extend(path for _marker, path in clipboard_images)
+            labels = ", ".join(marker.strip("[]")
+                               for marker, _path in clipboard_images)
+            print(f"(attached {labels})", file=sys.stderr)
         if not user:
             continue
         if user in ("/exit", "/bye", "/quit"):
             break
         if user == "/help":
             image_help = (
-                "/image [path|URL]  attach a file, URL, or clipboard image\n"
+                "Ctrl-V              paste a clipboard image\n"
+                "/image [path|URL]   attach a file, URL, or clipboard image\n"
                 if runner.supports_images else ""
             )
             print(image_help +

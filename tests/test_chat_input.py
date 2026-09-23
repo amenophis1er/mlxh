@@ -33,6 +33,25 @@ def test_multiline_bracketed_paste_waits_for_explicit_enter(tmp_path):
         assert asyncio.run(exercise()) == "first line\nsecond line"
 
 
+def test_ctrl_v_inserts_image_marker_and_records_attachment(tmp_path):
+    with create_pipe_input() as pipe:
+        session = _chat_session(
+            tmp_path / "history", ["/exit"], input=pipe, output=DummyOutput(),
+            image_paste=lambda: "/tmp/clipboard.png",
+        )
+
+        async def exercise():
+            task = asyncio.create_task(session.prompt_async("> "))
+            await asyncio.sleep(0)
+            pipe.send_text("\x16What is this?\r")
+            return await asyncio.wait_for(task, timeout=1)
+
+        assert asyncio.run(exercise()) == "[Image #1]What is this?"
+        assert session.take_pasted_images() == [
+            ("[Image #1]", "/tmp/clipboard.png")
+        ]
+
+
 def test_slash_command_completion(tmp_path):
     session = _chat_session(tmp_path / "history", ["/exit", "/reset"])
     document = prompt_toolkit.document.Document("/ex", cursor_position=3)

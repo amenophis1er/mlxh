@@ -4,8 +4,9 @@
 
 - **Chat input**: multiline terminal pastes remain one editable message and
   wait for an explicit Enter before generation starts.
-- **Chat images**: `/image` reads an image from the macOS clipboard, while
-  `/image <path-or-URL>` stages a validated local or bounded remote image.
+- **Chat images**: Ctrl-V reads the macOS image clipboard and inserts an
+  `[Image #N]` marker; `/image [path-or-URL]` also stages a clipboard, local,
+  or bounded remote image.
 
 ## v0.1.1 — 2026-09-23
 
