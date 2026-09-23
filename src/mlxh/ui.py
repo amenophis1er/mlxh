@@ -3,6 +3,9 @@
 import os
 import sys
 
+from rich.markdown import ListItem, Markdown
+from rich.segment import Segment
+
 
 def _colors_on(stream):
     return stream.isatty() and not os.environ.get("NO_COLOR")
@@ -131,6 +134,28 @@ def _select_numbered(title, options):
         print(dim(f"enter 1-{len(options)} or a name"))
 
 
+class _DottedListItem(ListItem):
+    """Rich list item that keeps the conventional period after its number."""
+
+    def render_number(self, console, options, number, last_number):
+        number_width = len(str(last_number)) + 3
+        render_options = options.update(width=options.max_width - number_width)
+        lines = console.render_lines(self.elements, render_options, style=self.style)
+        number_style = console.get_style("markdown.item.number", default="none")
+        padding = Segment(" " * number_width, number_style)
+        numeral = Segment(
+            f"{number}.".rjust(number_width - 1) + " ", number_style
+        )
+        for index, line in enumerate(lines):
+            yield numeral if index == 0 else padding
+            yield from line
+            yield Segment.line()
+
+
+class _ChatMarkdown(Markdown):
+    elements = {**Markdown.elements, "list_item_open": _DottedListItem}
+
+
 class StreamRenderer:
     """Live-render streamed Markdown, with plain pass-through when piped."""
 
@@ -142,6 +167,7 @@ class StreamRenderer:
         self.reasoning_text = ""
         self.markdown_text = ""
         self.pending_markdown = ""
+        self._needs_block_gap = False
         self._live = None
         self._console = None
 
@@ -175,8 +201,14 @@ class StreamRenderer:
         self._update(Text(text, style="dim"))
 
     def _render_markdown(self, text):
-        from rich.markdown import Markdown
-        self._update(Markdown(text, code_theme="monokai"))
+        self._update(_ChatMarkdown(text, code_theme="monokai"))
+
+    def _start_markdown_block(self, text):
+        stripped = text.lstrip()
+        heading_like = stripped.startswith("#") or stripped.startswith("**")
+        if self._needs_block_gap and heading_like:
+            self._rich().print()
+        self._needs_block_gap = False
 
     @staticmethod
     def _block_boundary(text):
@@ -216,10 +248,14 @@ class StreamRenderer:
         self.pending_markdown += text
         boundary = self._block_boundary(self.pending_markdown)
         if boundary:
-            self._render_markdown(self.pending_markdown[:boundary])
+            complete = self.pending_markdown[:boundary]
+            self._start_markdown_block(complete)
+            self._render_markdown(complete)
             self._stop_live()
+            self._needs_block_gap = True
             self.pending_markdown = self.pending_markdown[boundary:]
         if self.pending_markdown:
+            self._start_markdown_block(self.pending_markdown)
             self._render_markdown(self.pending_markdown)
 
     def finish(self):

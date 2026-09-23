@@ -74,6 +74,17 @@ def test_stream_renders_structural_markdown():
     assert "```" not in plain and "print(1)" in plain
 
 
+def test_stream_numbers_lists_with_periods_and_preserves_block_gaps():
+    r, buf = renderer()
+    r.feed("Intro.\n\n")
+    r.feed("## Key Observations:\n\n")
+    r.feed("1. First\n2. Second")
+    r.finish()
+    plain = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", buf.getvalue())
+    assert "\n\nKey Observations:" in plain
+    assert "1. First" in plain and "2. Second" in plain
+
+
 def test_stream_only_commits_blank_lines_outside_fences():
     text = "```text\nfirst\n\nsecond\n```\n\nafter"
     boundary = ui.StreamRenderer._block_boundary(text)
