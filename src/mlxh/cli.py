@@ -1138,6 +1138,25 @@ def _image_help():
           "/output DIR, /help, /exit")
 
 
+def _image_session(input=None, output=None):
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.completion import Completer, Completion
+
+    commands = ("/size", "/seed", "/steps", "/format", "/output", "/help", "/exit")
+
+    class SlashCompleter(Completer):
+        def get_completions(self, document, complete_event):
+            text = document.text_before_cursor
+            if not text.startswith("/") or " " in text:
+                return
+            for command in commands:
+                if command.startswith(text):
+                    yield Completion(command, start_position=-len(text))
+
+    return PromptSession(completer=SlashCompleter(), complete_while_typing=False,
+                         input=input, output=output)
+
+
 def cmd_image(args):
     import re
 
@@ -1200,9 +1219,10 @@ def cmd_image(args):
         if not sys.stdin.isatty():
             ui.fail("provide a prompt or run `mlxh image` in a terminal")
         _image_help()
+        session = _image_session()
         while True:
             try:
-                line = input("image> ").strip()
+                line = session.prompt("image> ").strip()
             except EOFError:
                 print()
                 break

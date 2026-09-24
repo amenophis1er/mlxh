@@ -83,6 +83,15 @@ def test_cli_image_saves_without_colliding_and_honors_explicit_overwrite(tmp_pat
     assert first.read_bytes() == b"three"
 
 
+def test_image_repl_slash_command_completion():
+    from prompt_toolkit.document import Document
+
+    session = cli._image_session()
+    completions = list(session.completer.get_completions(Document("/s"), None))
+    assert [item.text for item in completions] == ["/size", "/seed", "/steps"]
+    assert list(session.completer.get_completions(Document("/size "), None)) == []
+
+
 def test_one_shot_image_cli_uses_server_and_requested_options(tmp_path, monkeypatch):
     cfg = {**cli.DEFAULTS, "models_dir": str(tmp_path), "port": 9876}
     model_path = tmp_path / "klein"
