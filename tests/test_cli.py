@@ -123,6 +123,14 @@ def test_image_repl_path_completion_expands_tilde(tmp_path, monkeypatch):
     ]
 
 
+def test_image_repl_prompt_shows_pending_reference_markers():
+    assert cli._image_prompt_message([]) == "image> "
+    assert cli._image_prompt_message(["/tmp/one.png"]) == "image [Image #1]> "
+    assert cli._image_prompt_message(["/tmp/one.png", "/tmp/two.png"]) == (
+        "image [Image #1] [Image #2]> "
+    )
+
+
 def test_image_edit_request_uses_multipart_endpoint(tmp_path, monkeypatch):
     import base64
     import json

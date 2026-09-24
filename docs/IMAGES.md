@@ -71,8 +71,11 @@ mlxh image klein                    # interactive
 ```
 
 Repeat `--input-image` or `/ref PATH` to provide up to four references.
-Interactive references apply to the next submitted prompt; `/clear-refs` clears
-pending references. The API and CLI accept PNG, JPEG, and WebP; each input is
+Interactive references apply to the next submitted prompt and appear as
+`[Image #N]` in the prompt label while pending. Press Tab after `/ref ` or
+`/output ` to complete paths; `~` expands. `/clear-refs` clears pending
+references. Without a pending reference, the prompt is text-to-image—not an
+edit of the previous output. The API and CLI accept PNG, JPEG, and WebP; each input is
 limited to 25 MiB and 16 megapixels, with a 50 MiB aggregate request limit.
 The pinned Klein edit backend downsizes each reference aspect-preservingly to
 at most 1 megapixel, then center-crops to dimensions divisible by 16. Fine

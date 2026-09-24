@@ -1172,8 +1172,14 @@ def _save_cli_image(data, prompt, output_dir, output_format, explicit=None, forc
 
 def _image_help():
     print("Enter a prompt to generate; /ref PATH attaches an image for the next prompt. "
+          "Tab completes /ref and /output paths (~ expands). "
           "Commands: /clear-refs, /size auto|WIDTHxHEIGHT, /seed random|N, "
           "/steps default|1..100, /format png|jpeg|webp, /output DIR, /help, /exit")
+
+
+def _image_prompt_message(references):
+    markers = " ".join(f"[Image #{index}]" for index, _ in enumerate(references, 1))
+    return f"image {markers}> " if markers else "image> "
 
 
 def _image_session(input=None, output=None):
@@ -1304,7 +1310,7 @@ def cmd_image(args):
         session = _image_session()
         while True:
             try:
-                line = session.prompt("image> ").strip()
+                line = session.prompt(_image_prompt_message(state["references"])).strip()
             except EOFError:
                 print()
                 break
