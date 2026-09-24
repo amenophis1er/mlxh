@@ -92,6 +92,37 @@ def test_image_repl_slash_command_completion():
     assert list(session.completer.get_completions(Document("/size "), None)) == []
 
 
+def test_image_repl_completes_paths_for_ref_and_output(tmp_path, monkeypatch):
+    from prompt_toolkit.document import Document
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "input image.png").touch()
+    (tmp_path / "folder").mkdir()
+    session = cli._image_session()
+    ref = list(session.completer.get_completions(Document("/ref input"), None))
+    output = list(session.completer.get_completions(Document("/output f"), None))
+    assert [(item.text, item.display_text) for item in ref] == [
+        (" image.png", "input image.png"),
+    ]
+    assert [(item.text, item.display_text) for item in output] == [("older", "folder/")]
+
+
+def test_image_repl_path_completion_expands_tilde(tmp_path, monkeypatch):
+    from prompt_toolkit.document import Document
+
+    pictures = tmp_path / "Pictures"
+    pictures.mkdir()
+    (pictures / "photo.png").touch()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    session = cli._image_session()
+    completions = list(session.completer.get_completions(
+        Document("/ref ~/Pictures/pho"), None,
+    ))
+    assert [(item.text, item.display_text) for item in completions] == [
+        ("to.png", "photo.png"),
+    ]
+
+
 def test_image_edit_request_uses_multipart_endpoint(tmp_path, monkeypatch):
     import base64
     import json

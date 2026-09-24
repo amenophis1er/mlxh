@@ -1178,14 +1178,28 @@ def _image_help():
 
 def _image_session(input=None, output=None):
     from prompt_toolkit import PromptSession
-    from prompt_toolkit.completion import Completer, Completion
+    from prompt_toolkit.completion import Completer, Completion, PathCompleter
+    from prompt_toolkit.document import Document
 
     commands = ("/ref", "/clear-refs", "/size", "/seed", "/steps",
                 "/format", "/output", "/help", "/exit")
 
     class SlashCompleter(Completer):
+        image_paths = PathCompleter(expanduser=True)
+        output_paths = PathCompleter(expanduser=True, only_directories=True)
+
         def get_completions(self, document, complete_event):
             text = document.text_before_cursor
+            if text.startswith("/ref "):
+                yield from self.image_paths.get_completions(
+                    Document(text[5:]), complete_event,
+                )
+                return
+            if text.startswith("/output "):
+                yield from self.output_paths.get_completions(
+                    Document(text[8:]), complete_event,
+                )
+                return
             if not text.startswith("/") or " " in text:
                 return
             for command in commands:
