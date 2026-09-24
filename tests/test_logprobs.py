@@ -5,6 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from mlxh import serve_app
+from mlxh.engine import InferenceEngine
 
 
 client = TestClient(serve_app.app)
@@ -103,10 +104,9 @@ def test_chat_completion_assembles_one_entry_per_generated_token(monkeypatch):
         logprobs_out=([10, 12, 11], [-0.1, -0.5, -1.0], -0.1),
     )
     final_duplicate = generation(text="", generation_tokens=1)
-    monkeypatch.setattr(
-        serve_app, "runner",
-        NS(decode_token=lambda token_id: {10: "A", 11: "B", 12: "C"}[token_id]),
-    )
+    monkeypatch.setattr(serve_app, "engine", NS(runner=NS(
+        decode_token=lambda token_id: {10: "A", 11: "B", 12: "C"}[token_id]
+    )))
     monkeypatch.setattr(
         serve_app, "submit", lambda _body: queued(first, final_duplicate)
     )
@@ -161,12 +161,13 @@ def test_enable_thinking_request_override(monkeypatch):
         def stream(self, *_args, **_kwargs):
             yield generation()
 
-    monkeypatch.setattr(serve_app, "runner", Runner())
-    monkeypatch.setitem(serve_app.SETTINGS, "thinking", "on")
-
-    list(serve_app.run_generation({
+    settings = {**serve_app.SETTINGS, "thinking": "on"}
+    engine = InferenceEngine("/unused", "test", settings)
+    engine.runner = Runner()
+    request = serve_app._request({
         "messages": [{"role": "user", "content": "hi"}],
         "chat_template_kwargs": {"enable_thinking": False},
-    }))
+    })
+    list(engine._run_generation(request))
 
     assert seen["thinking"] is False

@@ -1,6 +1,7 @@
 import pytest
 
 from mlxh import serve_app
+from mlxh.engine import LogprobsOptions
 
 
 mx = pytest.importorskip("mlx.core")
@@ -27,9 +28,10 @@ def test_compute_logprobs_clamps_top_k_and_sorts_targeted_union():
     })()
     logprobs = mx.array([-3.0, -0.1, -2.0, -1.0])
 
-    serve_app._compute_logprobs(response, logprobs, {
-        "top": 128, "ids": [2], "allowed": [], "as_ids": False,
-    }, mx)
+    serve_app._compute_logprobs(
+        response, logprobs,
+        LogprobsOptions(top=128, ids=[2], allowed=[], as_ids=False), mx,
+    )
 
     ids, values, token_lp = response.logprobs_out
     assert ids == [1, 3, 2, 0]
