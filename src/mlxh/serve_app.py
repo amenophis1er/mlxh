@@ -9,6 +9,7 @@ import base64
 import binascii
 import importlib.metadata
 import json
+import math
 import os
 import queue
 import sys
@@ -202,6 +203,126 @@ def extract_messages(raw_messages):
     return messages, images, tmp_files
 
 
+def shape_logprobs(token_id, token_lp, top_ids, top_lps, decode, as_ids):
+    """Build one OpenAI logprobs content entry from plain Python values."""
+    def token_info(item_id, logprob):
+        token = f"token_id:{item_id}" if as_ids else decode(item_id)
+        return {
+            "token": token,
+            "logprob": float(logprob),
+            "bytes": None if as_ids else list(token.encode("utf-8")),
+        }
+
+    return {
+        **token_info(token_id, token_lp),
+        "top_logprobs": [
+            token_info(item_id, logprob)
+            for item_id, logprob in zip(top_ids, top_lps)
+        ],
+    }
+
+
+def _validate_id_list(body, field, *, nonempty=False):
+    if field not in body:
+        return []
+    value = body[field]
+    if not isinstance(value, list):
+        raise HTTPException(400, f"{field} must be a list of integers")
+    if nonempty and not value:
+        raise HTTPException(400, f"{field} must not be empty")
+    if any(isinstance(item, bool) or not isinstance(item, int) for item in value):
+        raise HTTPException(400, f"{field} must contain only integers")
+    if any(item < 0 for item in value):
+        raise HTTPException(400, f"{field} must contain only non-negative ids")
+    if len(set(value)) != len(value):
+        raise HTTPException(400, f"{field} must not contain duplicate ids")
+    return value
+
+
+def _prepare_logprobs(body):
+    """Validate logprobs options before the request reaches the MLX worker."""
+    body.pop("_logprobs", None)
+    if "logprobs" in body and not isinstance(body["logprobs"], bool):
+        raise HTTPException(400, "logprobs must be a boolean")
+    if not body.get("logprobs"):
+        return
+    if body.get("stream"):
+        raise HTTPException(400, "logprobs are not available on streaming responses")
+    top = body.get("top_logprobs", 0)
+    if isinstance(top, bool) or not isinstance(top, int) or not 0 <= top <= 128:
+        raise HTTPException(400, "top_logprobs must be an integer from 0 to 128")
+    as_ids = body.get("return_tokens_as_token_ids", False)
+    if not isinstance(as_ids, bool):
+        raise HTTPException(400, "return_tokens_as_token_ids must be a boolean")
+    ids = _validate_id_list(body, "logprob_token_ids", nonempty=True)
+    allowed = _validate_id_list(body, "allowed_token_ids")
+    body["_logprobs"] = {
+        "top": top, "ids": ids, "allowed": allowed, "as_ids": as_ids,
+    }
+
+
+def _compute_logprobs(resp, logprobs, opts, mx):
+    """Attach evaluated, plain-Python logprob values to a generation item."""
+    vocab = int(logprobs.shape[-1])
+    bad_requested = [token_id for token_id in opts["ids"] if token_id >= vocab]
+    if bad_requested:
+        raise HTTPException(
+            400,
+            f"logprob_token_ids contains id {bad_requested[0]} outside vocab size {vocab}",
+        )
+    bad_allowed = [token_id for token_id in opts["allowed"] if token_id >= vocab]
+    if bad_allowed:
+        raise HTTPException(
+            400,
+            f"allowed_token_ids contains id {bad_allowed[0]} outside vocab size {vocab}",
+        )
+
+    top_ids = []
+    k = min(opts["top"], vocab)
+    if k:
+        indices = mx.argpartition(-logprobs, k - 1)[:k]
+        values = logprobs[indices]
+        order = mx.argsort(-values)
+        top_ids = [int(item) for item in indices[order].tolist()]
+
+    selected = list(dict.fromkeys([*top_ids, *opts["ids"]]))
+    if selected:
+        values = [
+            float(value)
+            for value in logprobs[mx.array(selected)].tolist()
+        ]
+        ranked = sorted(zip(selected, values), key=lambda item: item[1], reverse=True)
+        selected = [token_id for token_id, _value in ranked]
+        values = [value for _token_id, value in ranked]
+        if not all(math.isfinite(value) for value in values):
+            raise RuntimeError("model returned a non-finite requested logprob")
+    else:
+        values = []
+    token_lp = float(logprobs[int(resp.token)].item())
+    if not math.isfinite(token_lp):
+        raise RuntimeError("model returned a non-finite generated-token logprob")
+    resp.logprobs_out = (selected, values, token_lp)
+
+
+def _capture_float32_logprobs(mx):
+    """Return a no-op logits processor and its per-token capture queue."""
+    captured = []
+
+    def capture(_tokens, logits):
+        logits32 = logits.astype(mx.float32)
+        normalized = logits32 - mx.logsumexp(logits32, axis=-1, keepdims=True)
+        captured.append(normalized.squeeze(0))
+        return logits
+
+    return captured, capture
+
+
+def _should_shape_logprobs(resp, previous_tokens):
+    """Final stop records represent EOS, even when they flush buffered text."""
+    return (int(resp.generation_tokens) > previous_tokens
+            and resp.finish_reason != "stop")
+
+
 def run_generation(body):
     """Yield generation chunks. Runs only on the gen_worker thread."""
     messages, images, tmp_files = extract_messages(body.get("messages", []))
@@ -210,6 +331,10 @@ def run_generation(body):
         max_tokens = min(max_tokens, SETTINGS["max_tokens_cap"])
     tools = body.get("tools") or None
     thinking = {"on": True, "off": False}.get(SETTINGS["thinking"])
+    chat_template_kwargs = body.get("chat_template_kwargs") or {}
+    if (isinstance(chat_template_kwargs, dict)
+            and isinstance(chat_template_kwargs.get("enable_thinking"), bool)):
+        thinking = chat_template_kwargs["enable_thinking"]
     prompt = runner.template(messages, num_images=len(images), tools=tools,
                              thinking=thinking)
     cap = SETTINGS["max_prompt_tokens"]
@@ -230,20 +355,42 @@ def run_generation(body):
     # mid-<think>; hold it back so clients only see the actual answer.
     pending = "" if (isinstance(prompt, str)
                      and prompt.rstrip().endswith("<think>")) else None
+    logprobs_opts = body.get("_logprobs")
+    captured_logprobs, logits_processors = [], None
+    if logprobs_opts:
+        import mlx.core as mx
+        captured_logprobs, capture = _capture_float32_logprobs(mx)
+        logits_processors = [capture]
+    logged_tokens = 0
     try:
         for resp in runner.stream(
             prompt, images=images, max_tokens=max_tokens,
             temperature=body.get("temperature"), top_p=body.get("top_p"),
+            logits_processors=logits_processors,
         ):
             last = resp
             if pending is not None:
                 pending += resp.text
                 if "</think>" not in pending:
-                    continue
-                import dataclasses
-                after = pending.split("</think>", 1)[1].lstrip("\n")
-                pending = None
-                resp = dataclasses.replace(resp, text=after)
+                    if not logprobs_opts:
+                        continue
+                    import dataclasses
+                    resp = dataclasses.replace(resp, text="")
+                else:
+                    import dataclasses
+                    after = pending.split("</think>", 1)[1].lstrip("\n")
+                    pending = None
+                    resp = dataclasses.replace(resp, text=after)
+            generation_tokens = int(resp.generation_tokens)
+            is_new_token = generation_tokens > logged_tokens
+            should_shape = _should_shape_logprobs(resp, logged_tokens)
+            if logprobs_opts and is_new_token:
+                if not captured_logprobs:
+                    raise RuntimeError("model did not expose logits for a generated token")
+                token_logprobs = captured_logprobs.pop(0)
+                logged_tokens = generation_tokens
+                if should_shape:
+                    _compute_logprobs(resp, token_logprobs, logprobs_opts, mx)
             yield resp
     finally:
         for f in tmp_files:
@@ -531,6 +678,7 @@ def models():
 def chat_completions(body: dict):
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
     created = int(time.time())
+    _prepare_logprobs(body)
 
     def usage_of(last):
         return {
@@ -596,7 +744,7 @@ def chat_completions(body: dict):
 
         return StreamingResponse(sse(), media_type="text/event-stream")
 
-    parts, last = [], None
+    parts, last, logprobs_content = [], None, []
     while True:
         item = chunks.get()
         if item is None:
@@ -607,6 +755,12 @@ def chat_completions(body: dict):
             raise HTTPException(500, str(item))
         parts.append(item.text)
         last = item
+        if hasattr(item, "logprobs_out"):
+            top_ids, top_lps, token_lp = item.logprobs_out
+            logprobs_content.append(shape_logprobs(
+                item.token, token_lp, top_ids, top_lps,
+                runner.decode_token, body["_logprobs"]["as_ids"],
+            ))
     content, tool_calls = parse_tool_calls("".join(parts))
     message = {"role": "assistant", "content": content or None}
     if tool_calls:
@@ -617,6 +771,8 @@ def chat_completions(body: dict):
         "choices": [{
             "index": 0,
             "message": message,
+            "logprobs": ({"content": logprobs_content}
+                         if body.get("logprobs") else None),
             "finish_reason": "tool_calls" if tool_calls else (last.finish_reason or "stop"),
         }],
         "usage": usage_of(last),

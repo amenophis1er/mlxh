@@ -43,19 +43,25 @@ class VLMRunner:
             self.processor, self.config, messages, num_images=num_images, **kwargs
         )
 
-    def stream(self, prompt, images=None, max_tokens=1024, temperature=None, top_p=None):
+    def stream(self, prompt, images=None, max_tokens=1024, temperature=None,
+               top_p=None, logits_processors=None):
         from mlx_vlm import stream_generate
         kwargs = {}
         if temperature is not None:
             kwargs["temperature"] = temperature
         if top_p is not None:
             kwargs["top_p"] = top_p
+        if logits_processors:
+            kwargs["logits_processors"] = logits_processors
         if self.apc is not None:
             kwargs["apc_manager"] = self.apc
         yield from stream_generate(
             self.model, self.processor, prompt,
             image=images or None, max_tokens=max_tokens, **kwargs,
         )
+
+    def decode_token(self, token_id: int) -> str:
+        return self.processor.tokenizer.decode([token_id])
 
 
 class TextRunner:
@@ -73,7 +79,8 @@ class TextRunner:
             messages, tokenize=True, add_generation_prompt=True, **kwargs
         )
 
-    def stream(self, prompt, images=None, max_tokens=1024, temperature=None, top_p=None):
+    def stream(self, prompt, images=None, max_tokens=1024, temperature=None,
+               top_p=None, logits_processors=None):
         from mlx_lm import stream_generate
         from mlx_lm.sample_utils import make_sampler
         kwargs = {}
@@ -82,9 +89,14 @@ class TextRunner:
                 temp=temperature if temperature is not None else 1.0,
                 top_p=top_p if top_p is not None else 1.0,
             )
+        if logits_processors:
+            kwargs["logits_processors"] = logits_processors
         yield from stream_generate(
             self.model, self.tokenizer, prompt, max_tokens=max_tokens, **kwargs
         )
+
+    def decode_token(self, token_id: int) -> str:
+        return self.tokenizer.decode([token_id])
 
 
 def _quiet_libraries():

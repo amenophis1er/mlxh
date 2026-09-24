@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Targeted logprobs**: non-streaming OpenAI chat completions can return
+  full-vocabulary token log-probabilities, including the vLLM-compatible
+  targeted-ID fields used by the frozen OpenJev helper.
 - **Chat output**: streamed responses now use a live Rich Markdown renderer
   for headings, lists, tables, links, and fenced code blocks; pipes and
   `NO_COLOR` still receive plain output. The response footer includes total

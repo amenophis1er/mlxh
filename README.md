@@ -120,6 +120,10 @@ curl http://localhost:1060/v1/chat/completions -H "Content-Type: application/jso
   -d '{"model":"bonsai2","messages":[{"role":"user","content":"hi"}],"max_tokens":100}'
 ```
 
+Non-streaming chat completions also expose targeted token log-probabilities;
+see [running OpenJev through mlxh](docs/openjev.md) for the reference helper
+setup and calibration caveats.
+
 The server also speaks the **Anthropic Messages API** (`/v1/messages`,
 streaming with keepalive pings, tool use, images, `count_tokens`), which is
 what Claude Code uses. `GET /mlxh/info` reports the live settings of a

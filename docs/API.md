@@ -79,6 +79,55 @@ r = client.chat.completions.create(model="local", stream=True,
     messages=[{"role": "user", "content": "hi"}])
 ```
 
+#### Token log-probabilities
+
+Non-streaming chat completions can return full-vocabulary token
+log-probabilities. This supports targeted-readout clients such as OpenJev.
+
+| Field | Type | Behavior |
+|---|---|---|
+| `logprobs` | boolean | Include per-generated-token log-probabilities. |
+| `top_logprobs` | integer, 0–128 | Include the top-k tokens from the full vocabulary. |
+| `logprob_token_ids` | integer array | Also include these exact token IDs at every position. |
+| `return_tokens_as_token_ids` | boolean | Return `token_id:N` labels instead of decoded strings. |
+| `allowed_token_ids` | integer array | Accepted and validated for vLLM helper compatibility, but does not constrain sampling. |
+| `chat_template_kwargs.enable_thinking` | boolean | Override the server's `thinking` setting for this request. |
+
+`top_logprobs` is the descending union of the full-vocabulary top-k and all
+requested `logprob_token_ids`, without renormalization. `allowed_token_ids`
+is deliberately ignored because it affects vLLM sampling, while targeted
+readout uses the unmasked scores. Normalization is computed in float32 even
+when model logits are BF16. Streaming with `logprobs: true` returns **400**.
+
+```json
+{
+  "choices": [{
+    "message": {"role": "assistant", "content": "A"},
+    "logprobs": {
+      "content": [{
+        "token": "A",
+        "logprob": -0.0213,
+        "bytes": [65],
+        "top_logprobs": [
+          {"token": "A", "logprob": -0.0213, "bytes": [65]},
+          {"token": "C", "logprob": -4.11, "bytes": [67]}
+        ]
+      }]
+    },
+    "finish_reason": "stop"
+  }]
+}
+```
+
+Without `logprobs: true`, each choice contains `"logprobs": null`. With
+`return_tokens_as_token_ids: true`, every token is formatted as
+`token_id:N` and `bytes` is `null`. Otherwise, `bytes` is the UTF-8 encoding
+of the decoded token; byte-fallback tokens may decode as U+FFFD, so this field
+is best-effort. Log-probabilities describe raw generated tokens: tool-call
+parsing and thinking suppression can rewrite the visible response afterward.
+Use `chat_template_kwargs: {"enable_thinking": false}` when token/text
+alignment matters.
+
 ### GET /v1/models
 
 One entry: the loaded model, `id` = its mlxh name.
@@ -174,7 +223,7 @@ until restart. `mlxh status` presents this endpoint as a table and `mlxh status
 
 ## Not implemented
 
-`n > 1`, `logprobs`, `response_format`/JSON mode, enforced `tool_choice`,
+`n > 1`, streaming logprobs, `response_format`/JSON mode, enforced `tool_choice`,
 `stop` sequences, embeddings, audio/video input, Anthropic `thinking` blocks
 in responses (reasoning is stripped instead), and multi-model serving — one
 server process serves one model; run several on different ports if needed.
