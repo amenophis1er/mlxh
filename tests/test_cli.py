@@ -183,3 +183,57 @@ def test_pi_register_provider_updates_existing_model_metadata(tmp_path):
         "id": "bonsai2", "contextWindow": 32768,
         "input": ["text", "image"],
     }
+
+
+def test_ensure_local_server_starts_in_new_session(monkeypatch, tmp_path):
+    cfg = cli.load_config()
+    calls = []
+    responses = iter((OSError("down"), {
+        "model": "m1", "capabilities": {"chat_protocol": 1},
+        "runtime": {"ready": True, "engine_version": 1},
+    }))
+
+    def fetch(_port):
+        result = next(responses)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    class Process:
+        pid = 123
+
+        def poll(self):
+            return None
+
+    def popen(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return Process()
+
+    monkeypatch.setattr(cli, "HOME", tmp_path)
+    monkeypatch.setattr(cli, "_fetch_info", fetch)
+    monkeypatch.setattr(cli.subprocess, "Popen", popen)
+    info, process = cli._ensure_local_server(
+        cfg, "m1", "/models/m1", 1060,
+        require_same_model=True, require_chat_protocol=True,
+    )
+
+    assert info["model"] == "m1"
+    assert process.pid == 123
+    assert calls[0][1]["start_new_session"] is True
+
+
+def test_chat_refuses_different_model_without_stopping_server(monkeypatch):
+    cfg = cli.load_config()
+    monkeypatch.setattr(cli, "_fetch_info", lambda _port: {
+        "model": "other", "runtime": {"ready": True, "engine_version": 1},
+        "capabilities": {"chat_protocol": 1},
+    })
+    monkeypatch.setattr(
+        cli, "_stop_owned_server",
+        lambda _process: pytest.fail("reused server must not be stopped"),
+    )
+    with pytest.raises(SystemExit):
+        cli._ensure_local_server(
+            cfg, "wanted", "/models/wanted", 1060,
+            require_same_model=True, require_chat_protocol=True,
+        )

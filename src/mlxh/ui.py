@@ -258,6 +258,33 @@ class StreamRenderer:
             self._start_markdown_block(self.pending_markdown)
             self._render_markdown(self.pending_markdown)
 
+    def feed_reasoning(self, text):
+        """Render an explicitly classified reasoning delta."""
+        if not self.enabled:
+            self.out.write(text)
+            self.out.flush()
+            return
+        if not self.reasoning:
+            self._stop_live()
+            if self.markdown_text:
+                self._rich().print()
+            self.reasoning = True
+            self.reasoning_text = ""
+        self.reasoning_text += text
+        self._render_reasoning(self.reasoning_text)
+
+    def end_reasoning(self):
+        if not self.reasoning:
+            return
+        if self.enabled:
+            self._render_reasoning(self.reasoning_text)
+            self._stop_live()
+            self._rich().print()
+        else:
+            self.out.write("\n")
+            self.out.flush()
+        self.reasoning_text, self.reasoning = "", False
+
     def finish(self):
         if not self.enabled:
             return

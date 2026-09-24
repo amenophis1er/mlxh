@@ -15,6 +15,7 @@ PAYLOAD = {
         "last_peak_memory_bytes": 13_900_000_000,
     },
     "runtime": {
+        "engine_version": 1,
         "uptime_s": 3601,
         "pid": 12345,
         "ready": True,
@@ -72,6 +73,7 @@ def test_status_old_server_has_unknown_state(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "old" in out and "—" in out
     assert "LOADING" not in out
+    assert "older mlxh server" in out
 
 
 def test_status_json_preserves_payload_and_adds_port(monkeypatch, capsys):

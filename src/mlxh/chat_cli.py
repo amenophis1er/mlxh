@@ -17,8 +17,8 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from . import ui
-from .loader import load_runner
-from .toolcalls import load_user_tools, parse_tool_calls, run_tool
+from .chat_transport import ChatTransport, TransportError, image_data_url
+from .toolcalls import load_user_tools, run_tool
 
 MAX_TOOL_ROUNDS = 5
 MAX_IMAGE_DOWNLOAD = 25 * 1024 * 1024
@@ -251,49 +251,76 @@ def _chat_session(history_path, commands, input=None, output=None, image_paste=N
     return session
 
 
-def generate_once(runner, messages, images, max_tokens, specs, thinking=None):
-    """One generation pass; streams visible text, hides tool-call XML."""
-    prompt = runner.template(messages, num_images=len(images), tools=specs,
-                             thinking=thinking)
-    think_open = isinstance(prompt, str) and prompt.rstrip().endswith("<think>")
-    parts, printed = [], 0
-    marker = "<tool_call>"
-    last = None
-    rend = ui.StreamRenderer(think_open=think_open)
-    for resp in runner.stream(prompt, images=images, max_tokens=max_tokens):
-        parts.append(resp.text)
-        full = "".join(parts)
-        cut = full.find(marker)
-        # hold back a tag-length tail so a half-arrived "<tool_ca" never prints
-        visible = full[:cut] if cut != -1 else full[: max(0, len(full) - len(marker))]
-        if len(visible) > printed:
-            rend.feed(visible[printed:])
-            printed = len(visible)
-        last = resp
-    full = "".join(parts)
-    cut = full.find(marker)
-    visible = full[:cut] if cut != -1 else full
-    if len(visible) > printed:
-        rend.feed(visible[printed:])
-    rend.finish()
-    return full, last
+def _request_messages(messages, images):
+    outgoing = [dict(message) for message in messages]
+    if images:
+        last = outgoing[-1]
+        content = [{"type": "text", "text": last.get("content", "")}]
+        content.extend({"type": "image_url", "image_url": {"url": image_data_url(path)}}
+                       for path in images)
+        last["content"] = content
+    return outgoing
 
 
-def ask(runner, messages, images, max_tokens, tools=None, thinking=None):
+def generate_once(transport, messages, images, max_tokens, specs, thinking=None):
+    """One server-backed generation pass with live terminal rendering."""
+    body = {
+        "messages": _request_messages(messages, images),
+        "max_tokens": max_tokens,
+    }
+    if specs:
+        body["tools"] = specs
+    if thinking is not None:
+        body["chat_template_kwargs"] = {"enable_thinking": thinking}
+    text_parts, tool_calls, done = [], [], None
+    renderer = None
+    try:
+        for kind, payload in transport.generate(body):
+            if kind == "reasoning_delta":
+                if renderer is None:
+                    renderer = ui.StreamRenderer()
+                renderer.feed_reasoning(payload.get("text", ""))
+            elif kind == "text_delta":
+                if renderer is None:
+                    renderer = ui.StreamRenderer()
+                delta = payload.get("text", "")
+                renderer.end_reasoning()
+                renderer.feed(delta)
+                text_parts.append(delta)
+            elif kind == "tool_calls":
+                tool_calls = payload.get("calls") or []
+            elif kind == "error":
+                raise TransportError(None, payload.get("message", "generation failed"))
+            elif kind == "done":
+                done = payload
+    except KeyboardInterrupt:
+        transport.cancel()
+        raise
+    if renderer is not None:
+        renderer.finish()
+    if done is None:
+        raise TransportError(None, "server stream ended without a completion event")
+    return "".join(text_parts), tool_calls, done
+
+
+def ask(transport, messages, images, max_tokens, tools=None, thinking=None):
     """tools: (registry, specs) to enable the agent loop, or None."""
     started = time.perf_counter()
     registry, specs = tools if tools else ({}, None)
-    total_tokens, tps = 0, 0.0
+    total_tokens, generation_s = 0, 0.0
     for _ in range(MAX_TOOL_ROUNDS):
-        text, last = generate_once(runner, messages, images, max_tokens, specs,
-                                   thinking=thinking)
-        total_tokens += last.generation_tokens
-        tps = last.generation_tps
-        content, tool_calls = parse_tool_calls(text)
+        content, tool_calls, done = generate_once(
+            transport, messages, images, max_tokens, specs, thinking=thinking
+        )
+        total_tokens += done.get("usage", {}).get("output_tokens", 0)
+        generation_s += done.get("generation_s", 0.0)
         if not tool_calls:
             elapsed = time.perf_counter() - started
+            tps = total_tokens / generation_s if generation_s else 0.0
             stats = f"{total_tokens} tokens in {elapsed:.1f}s @ {tps:.1f} tok/s"
             print("\n\n" + ui.dim(f"[{stats}]"))
+            if done.get("outcome") == "timed_out":
+                print("(generation timed out)", file=sys.stderr)
             messages.append({"role": "assistant", "content": content})
             return content
         messages.append({
@@ -316,9 +343,10 @@ def ask(runner, messages, images, max_tokens, tools=None, thinking=None):
     return ""
 
 
-def main():
+def run(argv=None):
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model-path", required=True)
+    ap.add_argument("--base-url", required=True)
+    ap.add_argument("--model", required=True)
     ap.add_argument("-p", "--prompt", help="one-shot prompt (omit for interactive chat)")
     ap.add_argument("-i", "--image", action="append", default=[],
                     help="local image path or HTTP(S) image URL to include")
@@ -330,15 +358,16 @@ def main():
                     help="ask the model to reason before answering (shown dimmed)")
     ap.add_argument("--no-thinking", action="store_true",
                     help="ask the model to skip reasoning")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     thinking = True if args.thinking else (False if args.no_thinking else None)
 
-    print(f"Loading {Path(args.model_path).name}...", file=sys.stderr)
     try:
-        runner = load_runner(args.model_path)
-    except RuntimeError as e:
-        sys.exit(str(e))
-    if args.image and not runner.supports_images:
+        transport = ChatTransport(args.base_url)
+        info = transport.info()
+    except TransportError as exc:
+        sys.exit(exc.message)
+    supports_images = bool(info.get("capabilities", {}).get("images"))
+    if args.image and not supports_images:
         sys.exit("this model does not support images")
     tools = None
     if args.tools and not args.no_tools:
@@ -369,7 +398,10 @@ def main():
             sys.exit(f"--image: {exc}")
         messages = [{"role": "user", "content": args.prompt}]
         try:
-            ask(runner, messages, images, args.max_tokens, tools, thinking=thinking)
+            try:
+                ask(transport, messages, images, args.max_tokens, tools, thinking=thinking)
+            except TransportError as exc:
+                sys.exit(exc.message)
         finally:
             _cleanup_images(temporary_images)
         return
@@ -377,7 +409,7 @@ def main():
     hist = Path(os.environ.get("MLXH_HOME", Path.home() / ".mlxh")) / "chat_history"
     hist.parent.mkdir(parents=True, exist_ok=True)
     cmds = ["/exit", "/reset", "/help", "/bye", "/quit"]
-    if runner.supports_images:
+    if supports_images:
         cmds.insert(0, "/image ")
     def paste_clipboard():
         path = _clipboard_image()
@@ -385,13 +417,13 @@ def main():
         return path
 
     session = _chat_session(
-        hist, cmds, image_paste=paste_clipboard if runner.supports_images else None
+        hist, cmds, image_paste=paste_clipboard if supports_images else None
     )
     prompt_ansi = (sys.stdin.isatty() and sys.stdout.isatty()
                    and not os.environ.get("NO_COLOR"))
 
     hint = "Ctrl-V pastes a clipboard image; /image [path|URL] also attaches, " \
-        if runner.supports_images else ""
+        if supports_images else ""
     print(f"Interactive chat. {hint}/reset clears history, /exit quits, /help lists commands.",
           file=sys.stderr)
     history, staged = [], []
@@ -427,7 +459,7 @@ def main():
             image_help = (
                 "Ctrl-V              paste a clipboard image\n"
                 "/image [path|URL]   attach a file, URL, or clipboard image\n"
-                if runner.supports_images else ""
+                if supports_images else ""
             )
             print(image_help +
                   "/reset         clear conversation history\n"
@@ -439,7 +471,7 @@ def main():
             print("(history cleared)", file=sys.stderr)
             continue
         if user == "/image" or user.startswith("/image "):
-            if not runner.supports_images:
+            if not supports_images:
                 print("(this model does not support images)", file=sys.stderr)
                 continue
             source = user[len("/image"):].strip() or None
@@ -462,15 +494,32 @@ def main():
             print(f"(attached {names})", file=sys.stderr)
             if not user:
                 continue
+        turn_start = len(history)
         history.append({"role": "user", "content": user})
         print()
         try:
-            ask(runner, history, staged, args.max_tokens, tools, thinking=thinking)
+            ask(transport, history, staged, args.max_tokens, tools, thinking=thinking)
+        except TransportError as exc:
+            del history[turn_start:]
+            if exc.status == 503:
+                print("(server busy: queue is full; try again)", file=sys.stderr)
+                continue
+            print(f"({exc.message})", file=sys.stderr)
+            continue
+        except KeyboardInterrupt:
+            del history[turn_start:]
+            print("\n(generation cancelled)", file=sys.stderr)
+            continue
         finally:
-            _cleanup_images(temporary_images)
+            if len(history) > turn_start:
+                _cleanup_images(temporary_images)
         staged = []
 
     _cleanup_images(temporary_images)
+
+
+def main():
+    run()
 
 
 if __name__ == "__main__":

@@ -183,10 +183,13 @@ def test_download_image_stops_when_stream_exceeds_limit(monkeypatch):
 
 
 def test_ask_reports_total_execution_time(monkeypatch, capsys):
-    response = SimpleNamespace(generation_tokens=42, generation_tps=10.0)
     monkeypatch.setattr(
         chat_cli, "generate_once",
-        lambda *_args, **_kwargs: ("answer", response),
+        lambda *_args, **_kwargs: (
+            "answer", [],
+            {"usage": {"output_tokens": 42}, "generation_s": 4.2,
+             "outcome": "completed"},
+        ),
     )
     clock = iter((10.0, 12.35))
     monkeypatch.setattr(chat_cli.time, "perf_counter", lambda: next(clock))

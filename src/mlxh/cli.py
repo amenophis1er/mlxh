@@ -42,6 +42,7 @@ import argparse
 import json
 import os
 import plistlib
+import signal
 import shutil
 import socket
 import subprocess
@@ -514,6 +515,8 @@ def cmd_status(args):
                            for header, width in zip(headers, widths))))
     print("  ".join(f"{value:{width}}"
                     for value, width in zip(values, widths)).rstrip())
+    if runtime.get("engine_version") is None:
+        ui.note("warning: this is an older mlxh server; restart it for live diagnostics")
 
 
 def service_plist(mlxh_bin: str, model: str, log_path: str,
@@ -739,10 +742,76 @@ def pi_register_provider(port, model, path=None, supports_images=False):
     return path
 
 
+def _stop_owned_server(process):
+    """Stop only the isolated server process group this CLI started."""
+    if process is None or process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=2)
+    except ProcessLookupError:
+        pass
+
+
+def _ensure_local_server(cfg, name, path, port, *, require_same_model=False,
+                         require_chat_protocol=False):
+    """Return (info, owned_process), starting an isolated server if absent."""
+    try:
+        info = _fetch_info(port)
+    except Exception:
+        info = None
+    started = None
+    if info is None:
+        ui.step(f"starting mlxh serve {name} on port {port}")
+        log_path = HOME / "serve.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a") as log:
+            started = subprocess.Popen(
+                serve_argv(cfg, name, path, {"port": port}),
+                stdout=log, stderr=log, start_new_session=True,
+            )
+        deadline = time.monotonic() + 180
+        while True:
+            try:
+                info = _fetch_info(port)
+                runtime = info.get("runtime") or {}
+                if runtime.get("ready"):
+                    break
+            except Exception:
+                pass
+            if started.poll() is not None or time.monotonic() > deadline:
+                _stop_owned_server(started)
+                ui.fail("server failed to start", f"see {log_path}")
+            time.sleep(0.25)
+    serving = info.get("model")
+    if serving != name:
+        if require_same_model:
+            if started:
+                _stop_owned_server(started)
+            ui.fail(
+                f"server on port {port} is serving '{serving}', not '{name}'",
+                "stop it or choose the model it already serves",
+            )
+        ui.note(f"reusing running server on port {port} "
+                f"(serving '{serving}', not '{name}')")
+    elif started is None:
+        ui.note(f"reusing running server on port {port}")
+    if require_chat_protocol and (
+        info.get("capabilities", {}).get("chat_protocol") != 1
+        or info.get("runtime", {}).get("engine_version") != 1
+    ):
+        if started:
+            _stop_owned_server(started)
+        ui.fail("the running mlxh server is too old for terminal chat",
+                "restart the server and try again")
+    return info, started
+
+
 def cmd_launch(args):
     import shutil as _shutil
-    import subprocess
-    import urllib.request
 
     cfg = load_config()
     if args.agent not in AGENTS:
@@ -788,43 +857,22 @@ def cmd_launch(args):
         # tokens that local models can't afford
         agent_args += ["--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}']
 
-    def server_up():
-        try:
-            with urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=1) as r:
-                return json.loads(r.read())["data"][0]["id"]
-        except Exception:
-            return None
-
     if args.dry_run:
         for k, v in env_extra.items():
             print(f"export {k}={v!r}")
         print(" ".join([args.agent, *agent_args, *args.rest]))
         return
 
-    started = None
-    serving = server_up()
-    if serving is None:
-        ui.step(f"starting mlxh serve {name} on port {port}")
-        log = (HOME / "serve.log").open("a")
-        started = subprocess.Popen(serve_argv(cfg, name, path, {"port": port}),
-                                   stdout=log, stderr=log)
-        import time
-        deadline = time.time() + 180
-        while server_up() is None:
-            if started.poll() is not None or time.time() > deadline:
-                ui.fail("server failed to start", f"see {HOME / 'serve.log'}")
-            time.sleep(1)
-    else:
-        if serving != name:
-            ui.note(f"reusing running server on port {port} (serving '{serving}', not '{name}')")
-        else:
-            ui.note(f"reusing running server on port {port}")
+    info, started = _ensure_local_server(
+        cfg, name, path, port, require_same_model=False,
+        require_chat_protocol=False,
+    )
+    if started is None:
         # A running server keeps the settings it started with; warn when the
         # config has moved on (the classic: raising max_prompt_tokens after
         # the server was already up).
         try:
-            with urllib.request.urlopen(f"http://127.0.0.1:{port}/mlxh/info", timeout=2) as r:
-                live = json.loads(r.read())["settings"]
+            live = info["settings"]
             stale = {k: (live[k], cfg[k]) for k in live
                      if k in cfg and live[k] != cfg[k]}
             if stale:
@@ -842,7 +890,7 @@ def cmd_launch(args):
 
     if not _shutil.which(args.agent):
         if started:
-            started.terminate()
+            _stop_owned_server(started)
         ui.fail(f"'{args.agent}' is not installed",
                 hint="install it first, or use --dry-run to see the wiring")
     cap = cfg["max_prompt_tokens"]
@@ -857,18 +905,43 @@ def cmd_launch(args):
                               env={**os.environ, **env_extra})
     finally:
         if started:
-            started.terminate()
+            _stop_owned_server(started)
             ui.note("stopped the mlxh server it started")
     sys.exit(proc.returncode)
 
 
 def cmd_chat(args):
     cfg = load_config()
-    path = resolve(cfg, args.name or pick_model(cfg, "chat with"))
-    os.execv(sys.executable, [
-        sys.executable, "-m", "mlxh.chat_cli", "--model-path", path,
-        *_chat_args(cfg, args.rest),
-    ])
+    name = args.name or pick_model(cfg, "chat with")
+    path = resolve(cfg, name)
+    port = cfg["port"]
+    _info, started = _ensure_local_server(
+        cfg, name, path, port, require_same_model=True,
+        require_chat_protocol=True,
+    )
+    from . import chat_cli
+
+    previous = {}
+
+    def stop_for_signal(signum, _frame):
+        _stop_owned_server(started)
+        raise SystemExit(128 + signum)
+
+    if started:
+        for signum in (signal.SIGTERM, signal.SIGHUP):
+            previous[signum] = signal.getsignal(signum)
+            signal.signal(signum, stop_for_signal)
+    try:
+        chat_cli.run([
+            "--base-url", f"http://127.0.0.1:{port}", "--model", name,
+            *_chat_args(cfg, args.rest),
+        ])
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+        if started:
+            _stop_owned_server(started)
+            ui.note("stopped the mlxh server it started")
 
 
 def cmd_config(args):
