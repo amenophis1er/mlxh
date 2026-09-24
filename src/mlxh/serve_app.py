@@ -31,7 +31,11 @@ from .engine import (
     compute_logprobs as _compute_logprobs,
 )
 from .toolcalls import parse_tool_calls
-from .images import BODY_LIMIT as IMAGE_BODY_LIMIT, ImageError, parse_request as parse_image_request
+from .images import (
+    BODY_LIMIT as IMAGE_BODY_LIMIT, EDIT_BODY_LIMIT, MAX_REFERENCE_IMAGES,
+    MAX_REFERENCE_IMAGE_BYTES, ImageEditRequest, ImageError,
+    parse_request as parse_image_request, stage_reference_image,
+)
 
 PRIVATE_BODY_LIMIT = 36 * 1024 * 1024
 
@@ -47,15 +51,25 @@ class PrivateBodyLimitMiddleware:
         self.app, self.limit = app, limit
 
     async def __call__(self, scope, receive, send):
-        is_image = scope.get("path") == "/v1/images/generations"
-        if scope.get("type") != "http" or scope.get("path") not in ("/mlxh/generate", "/v1/images/generations"):
+        path = scope.get("path")
+        limits = {
+            "/mlxh/generate": (self.limit, "36 MiB"),
+            "/v1/images/generations": (IMAGE_BODY_LIMIT, "256 KiB"),
+            "/v1/images/edits": (EDIT_BODY_LIMIT, "50 MiB"),
+        }
+        if scope.get("type") != "http" or path not in limits:
             await self.app(scope, receive, send)
             return
-        limit = IMAGE_BODY_LIMIT if is_image else self.limit
+        limit, limit_label = limits[path]
+        is_image = path.startswith("/v1/images/")
+
         def oversized():
             if is_image:
-                return JSONResponse(ImageError(413, "request body exceeds 256 KiB", code="body_too_large").envelope(), 413)
-            return JSONResponse({"detail": "request body exceeds 36 MiB"}, 413)
+                return JSONResponse(
+                    ImageError(413, f"request body exceeds {limit_label}",
+                               code="body_too_large").envelope(), 413,
+                )
+            return JSONResponse({"detail": f"request body exceeds {limit_label}"}, 413)
         headers = dict(scope.get("headers") or [])
         try:
             if int(headers.get(b"content-length", b"0")) > limit:
@@ -108,8 +122,6 @@ SETTINGS = {
 
 @app.post("/v1/images/generations")
 async def image_generations(request: Request):
-    job = None
-    completed = False
     current_engine = engine
     try:
         try:
@@ -122,8 +134,108 @@ async def image_generations(request: Request):
             raise ImageError(400, "this model does not support image generation",
                              "model", "unsupported_model_operation")
         parsed = parse_image_request(body, current_engine.model_id, current_engine.settings)
-        # Image admission never waits for readiness; this is a short locked
-        # enqueue, and cannot orphan a job if the request task is cancelled.
+        return await _wait_for_image_job(request, current_engine, parsed)
+    except ImageError as exc:
+        return JSONResponse(exc.envelope(), exc.status_code)
+
+
+@app.post("/v1/images/edits")
+async def image_edits(request: Request):
+    current_engine = engine
+    form = None
+    parsed = None
+    submitted = False
+    try:
+        if current_engine is None:
+            raise ImageError(503, "model engine is not configured", code="not_ready")
+        if getattr(current_engine, "model_kind", "language") != "image":
+            raise ImageError(400, "this model does not support image editing",
+                             "model", "unsupported_model_operation")
+        if (current_engine.runner is not None
+                and not getattr(current_engine.runner, "supports_edits", False)):
+            raise ImageError(400, "the loaded model does not support image editing",
+                             "model", "unsupported_model_operation")
+        try:
+            form = await request.form(max_files=MAX_REFERENCE_IMAGES,
+                                      max_fields=12, max_part_size=64 * 1024)
+        except HTTPException as exc:
+            raise ImageError(400, "invalid multipart edit request",
+                             code="invalid_multipart") from None
+        values, uploads = _image_edit_form_values(form)
+        staged = []
+        try:
+            for upload in uploads:
+                if upload.size is not None and upload.size > MAX_REFERENCE_IMAGE_BYTES:
+                    raise ImageError(400, "reference image exceeds the 25-MiB file limit",
+                                     "image", "image_too_large")
+                data = await upload.read(MAX_REFERENCE_IMAGE_BYTES + 1)
+                if len(data) > MAX_REFERENCE_IMAGE_BYTES:
+                    raise ImageError(400, "reference image exceeds the 25-MiB file limit",
+                                     "image", "image_too_large")
+                staged.append(stage_reference_image(data))
+            parsed = parse_image_request(
+                values, current_engine.model_id, current_engine.settings,
+                source="openai-image-edits", input_images=staged,
+                cleanup_input_images=True,
+            )
+        except BaseException:
+            for path in staged:
+                Path(path).unlink(missing_ok=True)
+            raise
+        finally:
+            if form is not None:
+                await form.close()
+                form = None
+        submitted = True
+        return await _wait_for_image_job(request, current_engine, parsed)
+    except ImageError as exc:
+        return JSONResponse(exc.envelope(), exc.status_code)
+    except EngineError:
+        if parsed is not None:
+            parsed.cleanup()
+        exc = ImageError(503, "image engine unavailable or queue full", code="server_busy")
+        return JSONResponse(exc.envelope(), 503)
+    except Exception:
+        if parsed is not None and not submitted:
+            parsed.cleanup()
+        raise
+    finally:
+        if form is not None:
+            await form.close()
+
+
+def _image_edit_form_values(form):
+    allowed = {"model", "prompt", "n", "size", "seed", "steps", "quality",
+               "response_format", "output_format", "output_compression", "user", "image"}
+    values, uploads = {}, []
+    for key, value in form.multi_items():
+        if key not in allowed:
+            raise ImageError(400, "unsupported edit request field", key, "unsupported_value")
+        if key == "image":
+            if not hasattr(value, "read") or not hasattr(value, "filename"):
+                raise ImageError(400, "image must be an uploaded file", "image", "invalid_image")
+            uploads.append(value)
+            continue
+        if key in values:
+            raise ImageError(400, f"{key} must be supplied only once", key)
+        if not isinstance(value, str):
+            raise ImageError(400, f"{key} must be text", key)
+        values[key] = value
+    if not uploads:
+        raise ImageError(400, "at least one reference image is required", "image")
+    for key in ("n", "seed", "steps", "output_compression"):
+        if key in values:
+            try:
+                values[key] = int(values[key])
+            except ValueError:
+                raise ImageError(400, f"{key} must be an integer", key) from None
+    return values, uploads
+
+
+async def _wait_for_image_job(request, current_engine, parsed):
+    job = None
+    completed = False
+    try:
         job = current_engine.submit(parsed)
         created = int(time.time())
         while True:
@@ -137,14 +249,19 @@ async def image_generations(request: Request):
             if isinstance(result, ImageError):
                 raise result
             return JSONResponse(await run_in_threadpool(result.response, created))
-    except ImageError as exc:
-        return JSONResponse(exc.envelope(), exc.status_code)
-    except EngineError:
-        exc = ImageError(503, "image engine unavailable or queue full", code="server_busy")
-        return JSONResponse(exc.envelope(), 503)
+    except ImageError:
+        raise
+    except EngineError as exc:
+        if job is None and isinstance(parsed, ImageEditRequest):
+            parsed.cleanup()
+        if exc.status_code == 400:
+            error = ImageError(400, exc.detail, code="unsupported_model_operation")
+            return JSONResponse(error.envelope(), 400)
+        error = ImageError(503, "image engine unavailable or queue full", code="server_busy")
+        return JSONResponse(error.envelope(), 503)
     finally:
         if job is not None and not completed:
-            current_engine.cancel(job.request_id, expected_source="openai-images")
+            current_engine.cancel(job.request_id, expected_source=parsed.source)
 
 
 def _request(body, source="openai"):

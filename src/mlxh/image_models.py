@@ -10,15 +10,15 @@ MFLUX_VERSION = "0.20.0"
 IMAGE_CATALOG = {
     "madroid/flux.1-schnell-mflux-4bit": {
         "backend": "mflux", "family": "flux1-schnell", "model_config": "schnell",
-        "quantization_bits": 4,
+        "quantization_bits": 4, "supports_edits": False,
     },
     "black-forest-labs/FLUX.2-klein-4B": {
         "backend": "mflux", "family": "flux2-klein-4b", "model_config": "flux2_klein_4b",
-        "quantization_bits": None,
+        "quantization_bits": None, "supports_edits": True,
     },
     "Qwen/Qwen-Image-2512": {
         "backend": "mflux", "family": "qwen-image", "model_config": "qwen_image",
-        "quantization_bits": None,
+        "quantization_bits": None, "supports_edits": False,
     },
 }
 

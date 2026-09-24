@@ -92,6 +92,44 @@ def test_image_repl_slash_command_completion():
     assert list(session.completer.get_completions(Document("/size "), None)) == []
 
 
+def test_image_edit_request_uses_multipart_endpoint(tmp_path, monkeypatch):
+    import base64
+    import json
+    import urllib.request
+
+    reference = tmp_path / "ref.png"
+    reference.write_bytes(b"png reference bytes")
+    captured = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self):
+            return json.dumps({"data": [{"b64_json": base64.b64encode(b"edited").decode()}],
+                               "size": "256x256", "mlxh": {"seed": 42}}).encode()
+
+    def open_url(request, timeout):
+        captured.update(url=request.full_url, headers=request.headers,
+                        body=request.data, timeout=timeout)
+        return Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", open_url)
+    result = cli._image_api_request(
+        9876, "klein", "edit this", size="256x256", seed=42,
+        steps=4, output_format="png", input_images=[str(reference)],
+    )
+    assert result[0] == b"edited"
+    assert captured["url"].endswith("/v1/images/edits")
+    assert "multipart/form-data; boundary=" in captured["headers"]["Content-type"]
+    assert b'name="image"; filename="reference"' in captured["body"]
+    assert b"png reference bytes" in captured["body"]
+    assert b"name=\"steps\"" in captured["body"]
+
+
 def test_one_shot_image_cli_uses_server_and_requested_options(tmp_path, monkeypatch):
     cfg = {**cli.DEFAULTS, "models_dir": str(tmp_path), "port": 9876}
     model_path = tmp_path / "klein"

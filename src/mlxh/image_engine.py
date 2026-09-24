@@ -7,7 +7,10 @@ from importlib.metadata import version
 
 from .engine import EngineError, EngineLifecycle
 from .image_models import image_metadata, MFLUX_VERSION
-from .images import ImageError, ImageGenerationRequest, ImageGenerationResult, encode_image
+from .images import (
+    ImageEditRequest, ImageError, ImageGenerationRequest,
+    ImageGenerationResult, encode_image,
+)
 
 
 class ImageEngine(EngineLifecycle):
@@ -16,6 +19,7 @@ class ImageEngine(EngineLifecycle):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._stats["images_generated"] = 0
+        self._stats["images_edited"] = 0
         self._stopping = False
         self.runner = None
         self.metadata = image_metadata(self.model_path) or {}
@@ -27,6 +31,8 @@ class ImageEngine(EngineLifecycle):
             raise EngineError(503, "image engine is stopping")
         if not self.ready.is_set() or self.failed:
             raise EngineError(503, "image engine is not ready")
+        if isinstance(request, ImageEditRequest) and not getattr(self.runner, "supports_edits", False):
+            raise EngineError(400, "this model does not support image editing")
         return super().submit(request)
 
     def stop(self):
@@ -71,6 +77,9 @@ class ImageEngine(EngineLifecycle):
         outcome = "completed"
         error = None
         was_active = not job.cancelled.is_set()
+        is_edit = isinstance(request, ImageEditRequest)
+        operation = "edit" if is_edit else "generate"
+        reference_count = len(request.input_images or ()) if is_edit else 0
 
         def check(step):
             if job.cancelled.is_set():
@@ -85,19 +94,22 @@ class ImageEngine(EngineLifecycle):
 
         try:
             check(0)
-            print(f"[image] start: {request.width}x{request.height}, steps={steps}, "
-                  f"seed={request.seed}, prompt_chars={len(request.prompt)}", flush=True)
+            print(f"[image] {operation} start: {request.width}x{request.height}, steps={steps}, "
+                  f"seed={request.seed}, references={reference_count}, "
+                  f"prompt_chars={len(request.prompt)}", flush=True)
             with self._stats_lock:
                 self._stats["busy"] = True
                 self._stats["current_request"] = {
                     "id": job.request_id, "source": request.source,
+                    "operation": operation, "reference_count": reference_count,
                     "started_monotonic": started, "width": request.width,
                     "height": request.height, "steps": steps, "seed": request.seed,
                     "current_step": 0,
                 }
             self.runner.validate_prompt(request.prompt)
             check(0)
-            image = self.runner.generate(request, steps, check)
+            image = (self.runner.edit(request, steps, check) if is_edit
+                     else self.runner.generate(request, steps, check))
             check(steps)
             encoded = encode_image(image, request)
             check(steps)
@@ -112,6 +124,8 @@ class ImageEngine(EngineLifecycle):
             outcome = "failed"
             error = ImageError(500, "image generation failed; see server log", code="generation_failed")
         finally:
+            if isinstance(request, ImageEditRequest):
+                request.cleanup()
             if image is not None:
                 try:
                     image.close()
@@ -124,13 +138,15 @@ class ImageEngine(EngineLifecycle):
                 self._stats["busy"] = False
                 self._stats["current_request"] = None
                 self._stats["images_generated"] += int(result is not None)
+                self._stats["images_edited"] += int(result is not None and is_edit)
                 self._stats["last_request"] = {
                     "id": job.request_id, "source": request.source, "outcome": outcome,
+                    "operation": operation, "reference_count": reference_count,
                     "width": request.width, "height": request.height, "steps": steps,
                     "seed": request.seed, "generation_s": round(elapsed, 3),
                 }
             self._finish_job(job)
-            print(f"[image] end: {outcome} in {elapsed:.2f}s", flush=True)
+            print(f"[image] {operation} end: {outcome} in {elapsed:.2f}s", flush=True)
             # Publish only after diagnostics and MLX cleanup are complete.
             job.out.put(error if error is not None else result)
 
@@ -156,11 +172,13 @@ class ImageEngine(EngineLifecycle):
         return {
             "model": self.model_id, "model_kind": self.model_kind, "settings": self.settings,
             "capabilities": {"images": False, "image_generation": True,
-                             "image_edits": False, "chat_protocol": None},
+                             "image_edits": bool(getattr(runner, "supports_edits", False)),
+                             "chat_protocol": None},
             "image": {**self.metadata, "backend_version": MFLUX_VERSION,
                       "formats": ["png", "jpeg", "webp"], "default_size": default_size,
                       "default_steps": getattr(runner, "default_steps", None),
                       "max_image_pixels": self.settings.get("max_image_pixels", 4194304),
+                      "edit_limits": getattr(runner, "edit_limits", {}),
                       "prompt_limits": getattr(runner, "prompt_limits", {})},
             "mlx": memory,
             "runtime": {"engine_version": 1, "mlxh_version": version("mlxh"),
@@ -168,5 +186,6 @@ class ImageEngine(EngineLifecycle):
                         "ready": self.ready.is_set() and self.failed is None,
                         "busy": stats["busy"], "queue_depth": self.jobs.qsize(),
                         "requests": stats["requests"], "images_generated": stats["images_generated"],
+                        "images_edited": stats["images_edited"],
                         "current_request": current, "last_request": stats["last_request"]},
         }

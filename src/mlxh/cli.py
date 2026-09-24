@@ -1067,8 +1067,11 @@ def _pick_image_model(cfg):
     return available[idx]
 
 
-def _image_api_request(port, model, prompt, *, size, seed, steps, output_format):
+def _image_api_request(port, model, prompt, *, size, seed, steps, output_format,
+                       input_images=None):
     import base64
+    import mimetypes
+    import secrets
     import urllib.error
     import urllib.request
 
@@ -1078,11 +1081,40 @@ def _image_api_request(port, model, prompt, *, size, seed, steps, output_format)
         body["seed"] = seed
     if steps is not None:
         body["steps"] = steps
-    request = urllib.request.Request(
-        f"http://127.0.0.1:{port}/v1/images/generations",
-        data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"},
-    )
+    if input_images:
+        boundary = "mlxh-" + secrets.token_hex(16)
+        chunks = []
+
+        def field(name, value):
+            chunks.extend((
+                f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n".encode(),
+                str(value).encode(), b"\r\n",
+            ))
+
+        for key, value in body.items():
+            field(key, value)
+        for path in input_images:
+            path = Path(path).expanduser()
+            try:
+                image_bytes = path.read_bytes()
+            except OSError as exc:
+                raise RuntimeError(f"could not read reference image {path}: {exc}") from None
+            content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            chunks.extend((
+                (f"--{boundary}\r\nContent-Disposition: form-data; name=\"image\"; filename=\"reference\"\r\n"
+                 f"Content-Type: {content_type}\r\n\r\n").encode(),
+                image_bytes, b"\r\n",
+            ))
+        chunks.append(f"--{boundary}--\r\n".encode())
+        url = f"http://127.0.0.1:{port}/v1/images/edits"
+        payload = b"".join(chunks)
+        content_type = f"multipart/form-data; boundary={boundary}"
+    else:
+        url = f"http://127.0.0.1:{port}/v1/images/generations"
+        payload = json.dumps(body).encode()
+        content_type = "application/json"
+    request = urllib.request.Request(url, data=payload,
+                                     headers={"Content-Type": content_type})
     try:
         with urllib.request.urlopen(request, timeout=3600) as response:
             result = json.load(response)
@@ -1091,11 +1123,17 @@ def _image_api_request(port, model, prompt, *, size, seed, steps, output_format)
             error = json.loads(exc.read()).get("error", {}).get("message", str(exc))
         except (ValueError, AttributeError):
             error = str(exc)
-        raise RuntimeError(f"image API returned HTTP {exc.code}: {error}") from None
+        raise ImageAPIError(exc.code, f"image API returned HTTP {exc.code}: {error}") from None
     except urllib.error.URLError as exc:
         raise RuntimeError(f"could not reach the image server: {exc.reason}") from None
     return (base64.b64decode(result["data"][0]["b64_json"]),
             result.get("size", size), result.get("mlxh", {}))
+
+
+class ImageAPIError(RuntimeError):
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status = status
 
 
 def _save_cli_image(data, prompt, output_dir, output_format, explicit=None, force=False):
@@ -1133,16 +1171,17 @@ def _save_cli_image(data, prompt, output_dir, output_format, explicit=None, forc
 
 
 def _image_help():
-    print("Enter a prompt to generate; commands: /size auto|WIDTHxHEIGHT, "
-          "/seed random|N, /steps default|1..100, /format png|jpeg|webp, "
-          "/output DIR, /help, /exit")
+    print("Enter a prompt to generate; /ref PATH attaches an image for the next prompt. "
+          "Commands: /clear-refs, /size auto|WIDTHxHEIGHT, /seed random|N, "
+          "/steps default|1..100, /format png|jpeg|webp, /output DIR, /help, /exit")
 
 
 def _image_session(input=None, output=None):
     from prompt_toolkit import PromptSession
     from prompt_toolkit.completion import Completer, Completion
 
-    commands = ("/size", "/seed", "/steps", "/format", "/output", "/help", "/exit")
+    commands = ("/ref", "/clear-refs", "/size", "/seed", "/steps",
+                "/format", "/output", "/help", "/exit")
 
     class SlashCompleter(Completer):
         def get_completions(self, document, complete_event):
@@ -1166,6 +1205,16 @@ def cmd_image(args):
     if checked_model_kind(path) != "image":
         ui.fail(f"'{name}' is not an image generation model")
     prompts = " ".join(args.prompt).strip()
+    from .images import MAX_REFERENCE_IMAGE_BYTES, MAX_REFERENCE_IMAGES
+    input_images = [Path(image).expanduser().resolve()
+                    for image in (getattr(args, "input_image", None) or [])]
+    if len(input_images) > MAX_REFERENCE_IMAGES:
+        ui.fail(f"at most {MAX_REFERENCE_IMAGES} reference images may be attached")
+    for image in input_images:
+        if not image.is_file() or not os.access(image, os.R_OK):
+            ui.fail(f"reference image does not exist or is unreadable: {image}")
+        if image.stat().st_size > MAX_REFERENCE_IMAGE_BYTES:
+            ui.fail(f"reference image exceeds the 25-MiB limit: {image}")
     if args.output and not prompts:
         ui.fail("--output requires a one-shot prompt")
     if args.force and not args.output:
@@ -1182,6 +1231,10 @@ def cmd_image(args):
         if started:
             _stop_owned_server(started)
         ui.fail("the running server is not an image generation server")
+    if input_images and not info.get("capabilities", {}).get("image_edits", False):
+        if started:
+            _stop_owned_server(started)
+        ui.fail(f"'{name}' does not support image editing")
 
     previous = {}
 
@@ -1197,20 +1250,35 @@ def cmd_image(args):
     state = {
         "size": args.size, "seed": args.seed, "steps": args.steps,
         "format": args.output_format, "output_dir": Path(args.output_dir or Path.cwd()),
+        "references": [str(image) for image in input_images],
     }
 
     def generate(prompt, explicit=None, force=False):
         ui.step("generating image...")
-        data, resolved_size, details = _image_api_request(
-            port, name, prompt, size=state["size"], seed=state["seed"],
-            steps=state["steps"], output_format=state["format"],
-        )
+        reference_count = len(state["references"])
+        try:
+            request_options = {}
+            if state["references"]:
+                request_options["input_images"] = state["references"]
+            data, resolved_size, details = _image_api_request(
+                port, name, prompt, size=state["size"], seed=state["seed"],
+                steps=state["steps"], output_format=state["format"],
+                **request_options,
+            )
+        except ImageAPIError as exc:
+            if exc.status in (499, 500, 504):
+                state["references"] = []
+                if reference_count:
+                    exc.args = (f"{exc} (reference images were consumed; attach them again to retry)",)
+            raise
+        state["references"] = []
         target = _save_cli_image(
             data, prompt, state["output_dir"], state["format"], explicit, force,
         )
         seed_text = f", seed {details['seed']}" if details.get("seed") is not None else ""
         steps_text = f", {details['steps']} steps" if details.get("steps") is not None else ""
-        ui.ok(f"saved {target} ({resolved_size}{seed_text}{steps_text})")
+        edit_text = f", edited {reference_count} reference(s)" if reference_count else ""
+        ui.ok(f"saved {target} ({resolved_size}{seed_text}{steps_text}{edit_text})")
 
     try:
         if prompts:
@@ -1241,6 +1309,23 @@ def cmd_image(args):
                     break
                 if command == "/help":
                     _image_help()
+                elif command == "/ref":
+                    image = Path(value).expanduser().resolve()
+                    if not value or not image.is_file() or not os.access(image, os.R_OK):
+                        print("usage: /ref PATH (path must name a readable local image)")
+                    elif len(state["references"]) >= MAX_REFERENCE_IMAGES:
+                        print(f"at most {MAX_REFERENCE_IMAGES} reference images may be attached")
+                    elif image.stat().st_size > MAX_REFERENCE_IMAGE_BYTES:
+                        print(f"reference image exceeds the 25-MiB limit: {image}")
+                    elif not info.get("capabilities", {}).get("image_edits", False):
+                        print(f"{name} does not support image editing")
+                    else:
+                        state["references"].append(str(image))
+                        ui.ok(f"[Image #{len(state['references'])}] attached: {image}")
+                elif command == "/clear-refs":
+                    count = len(state["references"])
+                    state["references"] = []
+                    ui.note(f"cleared {count} reference image(s)")
                 elif command == "/size":
                     if value not in ("auto",) and not re.fullmatch(r"\d{1,4}x\d{1,4}", value):
                         print("usage: /size auto|WIDTHxHEIGHT")
@@ -1473,6 +1558,8 @@ def main():
     p.add_argument("model", nargs="?", help="installed image model (prompts to choose if omitted)")
     p.add_argument("prompt", nargs="*", help="prompt text; omit for interactive mode")
     p.add_argument("--output", help="exact output path for one-shot generation (never overwrites by default)")
+    p.add_argument("--input-image", action="append", default=[], metavar="PATH",
+                   help="reference image for editing; may be repeated (edit-capable models only)")
     p.add_argument("--output-dir", help="directory for generated images (default: current directory)")
     p.add_argument("--force", action="store_true", help="allow overwriting an explicit --output path")
     p.add_argument("--size", default="auto", help="auto or WIDTHxHEIGHT (default: auto)")

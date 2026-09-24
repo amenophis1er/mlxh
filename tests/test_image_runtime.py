@@ -62,6 +62,7 @@ def test_staged_install_activates_only_after_validation(tmp_path, monkeypatch, f
         assert (root / "current").resolve() == old
     else:
         runtime.install(tmp_path)
+        assert any("Flux2KleinEdit" in str(arg) for call in calls for arg in call)
         assert (root / "current").resolve() != old
         assert json.loads((root / "current/mlxh-runtime.json").read_text()) == runtime.code_identity()
         assert not stale.exists()

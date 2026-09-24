@@ -33,6 +33,7 @@ dependencies = [
     "rich>=13,<15",
     "fastapi>=0.110",
     "uvicorn>=0.29",
+    "python-multipart>=0.0.20,<1",
     "huggingface_hub>=0.30",
 ]
 

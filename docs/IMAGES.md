@@ -1,8 +1,10 @@
 # Local image generation
 
-mlxh serves supported MFLUX text-to-image models through
-`POST /v1/images/generations`. It runs one model per server process; serve your
-language model on a different port if you need both at once.
+mlxh serves supported MFLUX image models through `POST /v1/images/generations`
+and, for edit-capable models, `POST /v1/images/edits`. It runs one model per
+server process; serve your language model on a different port if you need both
+at once. FLUX.2 Klein 4B supports reference-image editing; Schnell and Qwen
+Image currently support text-to-image only.
 
 ## Install and serve
 
@@ -51,6 +53,33 @@ memory. Smaller-memory machines have not been qualified. Resolution, MLX
 buffer caching, and other running models affect total memory requirements.
 The model card declares Apache-2.0; review the model's license for your use.
 
+## Edit with a reference image
+
+Klein can use one or more images as references. This is image-conditioned
+generation, not a pixel-preserving mask edit: details not mentioned in the
+prompt may still change.
+
+```bash
+mlxh image klein --input-image ~/Pictures/butterfly.png \
+  "Keep the shape and composition; add sharper hand-cut filigree to the lower wings" \
+  --seed 42 --steps 4 --output ~/Pictures/butterfly-edited.png
+
+mlxh image klein                    # interactive
+# At the image> prompt:
+# /ref ~/Pictures/butterfly.png
+# Keep the shape and composition; add sharper filigree to the lower wings
+```
+
+Repeat `--input-image` or `/ref PATH` to provide up to four references.
+Interactive references apply to the next submitted prompt; `/clear-refs` clears
+pending references. The API and CLI accept PNG, JPEG, and WebP; each input is
+limited to 25 MiB and 16 megapixels, with a 50 MiB aggregate request limit.
+The pinned Klein edit backend downsizes each reference aspect-preservingly to
+at most 1 megapixel, then center-crops to dimensions divisible by 16. Fine
+details may be lost during this preprocessing. Distilled Klein uses guidance
+1.0; mlxh does not expose guidance, image strength, or KV-cache controls.
+`/mlxh/info` advertises model edit support and effective limits.
+
 ## Generate with an OpenAI client
 
 ```python
@@ -76,7 +105,7 @@ object with the seed, step count and elapsed generation time. A fixed seed is
 repeatable with the same model, parameters, runtime and hardware; it is not a
 cross-version reproducibility guarantee.
 
-The CLI client uses the same endpoint and instrumented server engine:
+The CLI client uses the same local API and instrumented server engine:
 
 ```bash
 mlxh image klein "A tiny red fox reading in a cozy bookstore" \
@@ -113,8 +142,10 @@ window and truncates there as part of normal FLUX behavior.
 
 Unknown fields and unsupported options return 400, including `quality: hd` or
 `high`, URL output, `moderation`, `background`, streaming and partial images.
-Image editing and the Responses API image tool are not implemented. Local
-generation does not reproduce OpenAI moderation.
+Image edits support references only—no masks, inpainting, URL inputs, streaming,
+or Responses API image tool. Local generation/editing does not reproduce
+OpenAI moderation. Edit uploads are streamed through a 50 MiB body cap before
+multipart parsing; generation JSON remains capped at 256 KiB.
 
 ## Operations
 
@@ -127,15 +158,16 @@ cleared after each request, and encoded image metadata excludes prompts.
 The existing bounded queue and memory controls apply. Queue overflow returns
 503. `gen_timeout_s` starts when the worker takes the job and returns 504 after
 cooperative cancellation. Disconnects also cancel the job. Cancellation is
-checked around prompt encoding, between denoising steps and after VAE decoding;
-a native encoding/decoding call cannot be interrupted in its middle. A queued
-cancelled job is skipped. Failed attempts do not increment IMAGES.
+checked before MFLUX work and at denoising callbacks. Reference preprocessing
+and VAE encoding happen before those callbacks and cannot be interrupted in
+the middle; cancellation during preprocessing is observed when callbacks begin.
+A queued cancelled job is skipped. Failed attempts do not increment IMAGES.
 
 Request bodies are capped at 256 KiB before JSON parsing; encoded images are
 capped at 32 MiB before base64. Images errors use the OpenAI error envelope.
 `mlxh chat`, `run` and coding-agent launch reject image models. The existing
 LaunchAgent can serve an image model through the normal service configuration.
 
-References: [Images API](https://developers.openai.com/api/reference/cli/resources/images/methods/generate),
+References: [Images edit API](https://developers.openai.com/api/reference/cli/resources/images/methods/edit),
 [MFLUX](https://github.com/mflux-community/mflux),
 [verified model](https://huggingface.co/madroid/flux.1-schnell-mflux-4bit).

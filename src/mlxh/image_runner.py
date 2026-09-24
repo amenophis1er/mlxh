@@ -1,10 +1,15 @@
 """Pinned MFLUX adapter. No optional imports until a worker loads a model."""
 
 from .image_models import MFLUX_VERSION, image_metadata
+from .images import (
+    EFFECTIVE_REFERENCE_PIXELS, MAX_REFERENCE_IMAGES,
+    MAX_REFERENCE_IMAGE_BYTES, MAX_REFERENCE_PIXELS,
+)
 
 
 class ImageRunner:
     supports_images = False  # image INPUT; diffusion produces images
+    supports_edits = False
     supports_cache = False
     default_width = default_height = 1024
     default_steps = 4
@@ -31,8 +36,31 @@ class ImageRunner:
         if family == "flux1-schnell":
             model_class = Flux1
         elif family == "flux2-klein-4b":
-            from mflux.models.flux2.variants import Flux2Klein
-            model_class = Flux2Klein
+            from mflux.models.flux2.variants import Flux2Klein, Flux2KleinEdit
+
+            class _Flux2KleinEditCompat(Flux2KleinEdit):
+                """Keep txt2img parity while loading Klein weights only once.
+
+                In MFLUX 0.20.0, the edit class's no-reference path reaches
+                concatenate(None). Dispatch that path to Klein's txt2img
+                predictor; reference edits keep using the edit predictor.
+                """
+                def _predict(self, transformer):
+                    edit_predict = super()._predict(transformer)
+                    text_predict = Flux2Klein._predict(transformer)
+
+                    def predict(**kwargs):
+                        if kwargs.get("image_latents") is None:
+                            kwargs.pop("image_latents", None)
+                            kwargs.pop("image_latent_ids", None)
+                            kwargs.pop("kv_cache", None)
+                            kwargs.pop("negative_kv_cache", None)
+                            return text_predict(**kwargs)
+                        return edit_predict(**kwargs)
+
+                    return predict
+
+            model_class = _Flux2KleinEditCompat
         elif family == "qwen-image":
             from mflux.models.qwen.variants.txt2img.qwen_image import QwenImage
             model_class = QwenImage
@@ -40,6 +68,14 @@ class ImageRunner:
             raise ValueError(f"unsupported image family: {family}")
         self.model_config = getattr(ModelConfig, self.metadata["model_config"])()
         self.model = model_class(model_path=str(path), model_config=self.model_config)
+        self.supports_edits = bool(self.metadata.get("supports_edits"))
+        self.edit_limits = ({
+            "max_reference_images": MAX_REFERENCE_IMAGES,
+            "max_reference_image_bytes": MAX_REFERENCE_IMAGE_BYTES,
+            "max_reference_pixels": MAX_REFERENCE_PIXELS,
+            "effective_reference_pixels": EFFECTIVE_REFERENCE_PIXELS,
+            "preprocessing": "aspect-preserving resize then center-crop to multiples of 16",
+        } if self.supports_edits else {})
         if self.model.bits != self.metadata["quantization_bits"]:
             raise ValueError("image weights do not match declared quantization")
         tokenizers = self.model.tokenizers
@@ -115,10 +151,45 @@ class ImageRunner:
             result = self.model.generate_image(
                 prompt=request.prompt, seed=request.seed, width=request.width,
                 height=request.height, num_inference_steps=steps,
+                **({"image_paths": None} if self.supports_edits else {}),
             )
             check(steps)
             return result.image
         finally:
             self.model.callbacks = CallbackRegistry()
             # MFLUX caches prompts/embeddings by default; do not retain user input.
+            self.model.prompt_cache.clear()
+
+    def edit(self, request, steps, check):
+        if not self.supports_edits:
+            from .images import ImageError
+            raise ImageError(400, "this model does not support image editing",
+                             "model", "unsupported_model_operation")
+        import mlx.core as mx
+        from mflux.callbacks.callback_registry import CallbackRegistry
+
+        class Progress:
+            def call_before_loop(self, **kwargs):
+                check(0)
+
+            def call_in_loop(self, t, latents, **kwargs):
+                mx.eval(latents)
+                check(int(t) + 1)
+
+            def call_after_loop(self, **kwargs):
+                check(steps)
+
+        self.model.callbacks = CallbackRegistry()
+        self.model.callbacks.register(Progress())
+        try:
+            check(0)
+            result = self.model.generate_image(
+                prompt=request.prompt, seed=request.seed, width=request.width,
+                height=request.height, num_inference_steps=steps,
+                image_paths=request.input_images,
+            )
+            check(steps)
+            return result.image
+        finally:
+            self.model.callbacks = CallbackRegistry()
             self.model.prompt_cache.clear()

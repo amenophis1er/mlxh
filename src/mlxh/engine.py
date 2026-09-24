@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .images import ImageGenerationRequest
+    from .images import ImageEditRequest, ImageGenerationRequest
 
 from .loader import load_runner
 
@@ -65,7 +65,7 @@ class GenerationTerminal:
 
 @dataclass
 class Job:
-    request: GenerationRequest | ImageGenerationRequest
+    request: GenerationRequest | ImageGenerationRequest | ImageEditRequest
     out: queue.Queue
     request_id: str = field(default_factory=lambda: f"req_{uuid.uuid4().hex[:24]}")
     cancelled: threading.Event = field(default_factory=threading.Event)
@@ -162,6 +162,10 @@ class EngineLifecycle:
     @property
     def supports_images(self) -> bool:
         return bool(self.runner and self.runner.supports_images)
+
+    @property
+    def supports_image_edits(self) -> bool:
+        return bool(self.runner and getattr(self.runner, "supports_edits", False))
 
     def start(self):
         if self._thread and self._thread.is_alive():
@@ -493,7 +497,8 @@ class InferenceEngine(EngineLifecycle):
             "model_kind": self.model_kind,
             "settings": self.settings,
             "capabilities": {"images": self.supports_images, "chat_protocol": 1,
-                             "image_generation": False, "image_edits": False},
+                             "image_generation": False,
+                             "image_edits": self.supports_image_edits},
             "mlx": mlx_stats,
             "runtime": {
                 "engine_version": 1,

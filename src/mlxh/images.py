@@ -5,12 +5,19 @@ import io
 import math
 import re
 import secrets
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 
 from .engine import EngineError
 
 BODY_LIMIT = 256 * 1024
 OUTPUT_LIMIT = 32 * 1024 * 1024
+EDIT_BODY_LIMIT = 50 * 1024 * 1024
+MAX_REFERENCE_IMAGES = 4
+MAX_REFERENCE_IMAGE_BYTES = 25 * 1024 * 1024
+MAX_REFERENCE_PIXELS = 16_000_000
+EFFECTIVE_REFERENCE_PIXELS = 1_048_576
 
 
 class ImageError(EngineError):
@@ -37,6 +44,21 @@ class ImageGenerationRequest:
 
 
 @dataclass
+class ImageEditRequest(ImageGenerationRequest):
+    input_images: list[str] | None = None
+    cleanup_input_images: bool = False
+
+    def cleanup(self):
+        if not self.cleanup_input_images:
+            return
+        for path in self.input_images or ():
+            try:
+                Path(path).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+@dataclass
 class ImageGenerationResult:
     image: bytes
     request: ImageGenerationRequest
@@ -45,13 +67,20 @@ class ImageGenerationResult:
 
     def response(self, created):
         r = self.request
+        mlxh = {"seed": r.seed, "steps": self.steps,
+                "generation_s": round(self.generation_s, 3)}
+        if isinstance(r, ImageEditRequest):
+            mlxh.update(operation="edit", reference_images=len(r.input_images or ()))
         return {"created": created, "data": [{"b64_json": base64.b64encode(self.image).decode()}],
                 "output_format": r.output_format, "size": f"{r.width}x{r.height}",
-                "quality": "auto", "mlxh": {"seed": r.seed, "steps": self.steps,
-                                             "generation_s": round(self.generation_s, 3)}}
+                "quality": "auto", "mlxh": mlxh}
 
 
-def parse_request(body, model_id, settings):
+def parse_request(body, model_id, settings, *, source="openai-images",
+                  input_images=None, cleanup_input_images=False):
+    if input_images is not None and not 1 <= len(input_images) <= MAX_REFERENCE_IMAGES:
+        raise ImageError(400, f"provide between 1 and {MAX_REFERENCE_IMAGES} reference images",
+                         "image", "invalid_image_count")
     if not isinstance(body, dict):
         raise ImageError(400, "request must be a JSON object")
     fields = {"model", "prompt", "n", "size", "output_format", "output_compression",
@@ -101,7 +130,55 @@ def parse_request(body, model_id, settings):
     steps = body.get("steps")
     if steps is not None and (type(steps) is not int or not 1 <= steps <= 100):
         raise ImageError(400, "steps must be an integer in 1..100", "steps")
-    return ImageGenerationRequest(prompt, width, height, fmt, compression, seed, steps)
+    request_type = ImageEditRequest if input_images is not None else ImageGenerationRequest
+    extra = ({"input_images": input_images, "cleanup_input_images": cleanup_input_images}
+             if input_images is not None else {})
+    return request_type(prompt, width, height, fmt, compression, seed, steps,
+                        source=source, **extra)
+
+
+def stage_reference_image(data):
+    """Validate, normalize and stage one upload for the private MLX worker."""
+    import warnings
+    from PIL import Image, ImageOps, UnidentifiedImageError
+
+    if not data or len(data) > MAX_REFERENCE_IMAGE_BYTES:
+        raise ImageError(400, "reference image must be non-empty and at most 25 MiB",
+                         "image", "invalid_image")
+    path = None
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(io.BytesIO(data)) as source:
+                if source.format not in ("PNG", "JPEG", "WEBP"):
+                    raise ImageError(400, "reference image must be PNG, JPEG, or WebP",
+                                     "image", "unsupported_image_format")
+                if source.width * source.height > MAX_REFERENCE_PIXELS:
+                    raise ImageError(400, "reference image exceeds the 16-megapixel limit",
+                                     "image", "image_too_large")
+                source.load()
+                normalized = ImageOps.exif_transpose(source).convert("RGB")
+                try:
+                    with tempfile.NamedTemporaryFile(prefix="mlxh-image-ref-", suffix=".png",
+                                                     delete=False) as staged:
+                        path = staged.name
+                    normalized.save(path, format="PNG")
+                finally:
+                    normalized.close()
+        return path
+    except ImageError:
+        if path:
+            Path(path).unlink(missing_ok=True)
+        raise
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning):
+        if path:
+            Path(path).unlink(missing_ok=True)
+        raise ImageError(400, "reference image exceeds safe decode limits",
+                         "image", "image_too_large") from None
+    except (OSError, ValueError, UnidentifiedImageError):
+        if path:
+            Path(path).unlink(missing_ok=True)
+        raise ImageError(400, "invalid reference image", "image", "invalid_image") from None
 
 
 def encode_image(image, request):

@@ -251,5 +251,7 @@ server process serves one model; run several on different ports if needed.
 ## Image generation
 
 An image-model server supports `POST /v1/images/generations` with the OpenAI
-base64 response shape. See [image generation](IMAGES.md) for installation,
-the supported fields, SDK example, limits, and cancellation behavior.
+base64 response shape. Klein edit-capable servers also support
+`POST /v1/images/edits` with multipart image references. See
+[image generation and editing](IMAGES.md) for installation, supported fields,
+SDK/CLI examples, limits, capabilities, and cancellation behavior.

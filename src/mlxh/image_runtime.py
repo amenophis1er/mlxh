@@ -117,6 +117,7 @@ def install(home):
                      "import json; from mlxh.image_runtime import code_identity; "
                      "from mflux.models.flux.variants.txt2img.flux import Flux1; "
                      "from mflux.models.flux2.variants import Flux2Klein; "
+                     "from mflux.models.flux2.variants import Flux2KleinEdit; "
                      "from mflux.models.qwen.variants.txt2img.qwen_image import QwenImage; "
                      "print(json.dumps(code_identity()))"],
                     stdout=subprocess.PIPE, stderr=log, text=True, check=True,

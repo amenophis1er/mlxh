@@ -14,7 +14,10 @@ from mlxh import cli, serve_app
 from mlxh.engine import Job, GenerationRequest
 from mlxh.image_engine import ImageEngine
 from mlxh.image_models import IMAGE_CATALOG, IMAGE_METADATA, IMAGE_REPO, IMAGE_REVISION, image_metadata
-from mlxh.images import ImageError, parse_request, encode_image, ImageGenerationResult
+from mlxh.images import (
+    ImageEditRequest, ImageError, parse_request, encode_image,
+    ImageGenerationResult, stage_reference_image,
+)
 
 
 SETTINGS = {**serve_app.SETTINGS, "memory_limit_gb": -1, "gen_timeout_s": 0}
@@ -81,6 +84,39 @@ def test_per_request_steps_are_returned():
     assert req.steps == result["mlxh"]["steps"] == 7
 
 
+def test_reference_image_validation_and_normalization(monkeypatch):
+    source = io.BytesIO()
+    Image.new("RGBA", (20, 10), (255, 0, 0, 10)).save(source, format="PNG")
+    staged = stage_reference_image(source.getvalue())
+    try:
+        with Image.open(staged) as result:
+            assert result.format == "PNG"
+            assert result.mode == "RGB"
+            assert result.size == (20, 10)
+            assert not result.info
+    finally:
+        from pathlib import Path
+        Path(staged).unlink()
+    with pytest.raises(ImageError, match="invalid reference image"):
+        stage_reference_image(b"not an image")
+    monkeypatch.setattr("mlxh.images.MAX_REFERENCE_PIXELS", 100)
+    too_large = io.BytesIO()
+    Image.new("RGB", (11, 10)).save(too_large, format="PNG")
+    with pytest.raises(ImageError, match="16-megapixel"):
+        stage_reference_image(too_large.getvalue())
+
+
+def test_edit_request_is_typed_and_enforces_reference_count():
+    parsed = parse_request({"model": "klein", "prompt": "edit this"}, "klein",
+                           SETTINGS, source="openai-image-edits", input_images=["/tmp/ref.png"])
+    assert isinstance(parsed, ImageEditRequest)
+    assert parsed.source == "openai-image-edits"
+    assert parsed.input_images == ["/tmp/ref.png"]
+    with pytest.raises(ImageError, match="between 1 and 4"):
+        parse_request({"model": "klein", "prompt": "edit this"}, "klein",
+                      SETTINGS, input_images=[])
+
+
 class Runner:
     default_steps = 4
     supports_images = False
@@ -95,6 +131,17 @@ class Runner:
         for step in range(steps):
             check(step + 1)
         return Image.new("RGB", (req.width, req.height), "blue")
+
+
+class EditRunner(Runner):
+    supports_edits = True
+
+    def edit(self, req, steps, check):
+        self.calls += 1
+        self.references = list(req.input_images)
+        for step in range(steps):
+            check(step + 1)
+        return Image.new("RGB", (req.width, req.height), "green")
 
 
 def engine(tmp_path):
@@ -165,6 +212,48 @@ def test_failed_job_finalizes_and_next_job_works(tmp_path, mode, outcome):
     assert isinstance(next_job.out.get_nowait(), ImageGenerationResult)
 
 
+def test_edit_execution_instruments_and_cleans_private_inputs(tmp_path):
+    e, mx = engine(tmp_path), Memory()
+    e.runner = EditRunner()
+    e.runner.edit_limits = {"effective_reference_pixels": 1_048_576}
+    reference = tmp_path / "private-ref.png"
+    reference.write_bytes(b"staged")
+    req = ImageEditRequest("edit", 256, 256, "png", None, 42, 2,
+                           source="openai-image-edits", input_images=[str(reference)],
+                           cleanup_input_images=True)
+    job = e.submit(req)
+    e._execute(e.jobs.get_nowait(), mx)
+    result = job.out.get_nowait()
+    assert isinstance(result, ImageGenerationResult)
+    assert not reference.exists()
+    snapshot = e.snapshot()
+    assert snapshot["capabilities"]["image_edits"] is True
+    assert snapshot["image"]["edit_limits"]["effective_reference_pixels"] == 1_048_576
+    assert snapshot["runtime"]["images_generated"] == 1
+    assert snapshot["runtime"]["images_edited"] == 1
+    assert snapshot["runtime"]["last_request"]["operation"] == "edit"
+    assert snapshot["runtime"]["last_request"]["reference_count"] == 1
+    response = result.response(1)
+    assert response["mlxh"]["operation"] == "edit"
+    assert response["mlxh"]["reference_images"] == 1
+
+
+def test_cancelled_queued_edit_skips_runner_and_cleans_inputs(tmp_path):
+    e, mx = engine(tmp_path), Memory()
+    e.runner = EditRunner()
+    reference = tmp_path / "private-ref.png"
+    reference.write_bytes(b"staged")
+    req = ImageEditRequest("edit", 256, 256, "png", None, 42, 2,
+                           source="openai-image-edits", input_images=[str(reference)],
+                           cleanup_input_images=True)
+    job = e.submit(req)
+    e.cancel(job.request_id, expected_source="openai-image-edits")
+    e._execute(e.jobs.get_nowait(), mx)
+    assert e.runner.calls == 0
+    assert not reference.exists()
+    assert e._stats["last_request"]["outcome"] == "cancelled"
+
+
 def test_queue_full_and_wrong_kind(tmp_path):
     e = engine(tmp_path)
     e.settings["max_queued"] = 1
@@ -210,6 +299,82 @@ def test_api_success_and_invalid_body(tmp_path, monkeypatch):
     assert client.post("/v1/chat/completions", json={"messages": []}).status_code == 400
     assert client.post("/v1/images/generations", content=b"{}", headers={
         "content-length": str(serve_app.IMAGE_BODY_LIMIT + 1)}).status_code == 413
+
+
+def test_api_edit_accepts_multipart_and_cleans_staged_files(tmp_path, monkeypatch):
+    e = engine(tmp_path)
+    e.runner = EditRunner()
+    submit = e.submit
+
+    def immediate(req):
+        job = submit(req)
+        e._execute(e.jobs.get_nowait(), Memory())
+        return job
+
+    e.submit = immediate
+    monkeypatch.setattr(serve_app, "engine", e)
+    upload = io.BytesIO()
+    Image.new("RGBA", (32, 24), (20, 120, 40, 50)).save(upload, format="PNG")
+    response = TestClient(serve_app.app).post(
+        "/v1/images/edits",
+        data={"model": "schnell", "prompt": "Make it watercolor", "size": "256x256",
+              "seed": "42", "steps": "4"},
+        files=[("image", ("input.png", upload.getvalue(), "image/png"))],
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["mlxh"]["operation"] == "edit"
+    assert body["mlxh"]["reference_images"] == 1
+    assert e._stats["images_edited"] == 1
+    assert len(e.runner.references) == 1
+    assert not __import__("pathlib").Path(e.runner.references[0]).exists()
+
+
+def test_api_edit_rejects_unsupported_model_and_fields(tmp_path, monkeypatch):
+    e = engine(tmp_path)
+    monkeypatch.setattr(serve_app, "engine", e)
+    client = TestClient(serve_app.app)
+    unsupported = client.post("/v1/images/edits", data={"model": "klein", "prompt": "edit"})
+    assert unsupported.status_code == 400
+    assert unsupported.json()["error"]["code"] == "unsupported_model_operation"
+
+
+def test_api_edit_rejects_invalid_image_and_cleans_prior_staging(tmp_path, monkeypatch):
+    e = engine(tmp_path)
+    e.runner = EditRunner()
+    monkeypatch.setattr("tempfile.tempdir", str(tmp_path))
+    monkeypatch.setattr(serve_app, "engine", e)
+    valid = io.BytesIO()
+    Image.new("RGB", (8, 8), "red").save(valid, format="PNG")
+    response = TestClient(serve_app.app).post(
+        "/v1/images/edits", data={"model": "klein", "prompt": "edit"},
+        files=[("image", ("one.png", valid.getvalue(), "image/png")),
+               ("image", ("two.png", b"bad", "image/png"))],
+    )
+    assert response.status_code == 400
+    assert e._stats["requests"] == 0
+    assert not list(tmp_path.glob("mlxh-image-ref-*.png"))
+
+
+def test_edit_multipart_limit_has_accurate_error(monkeypatch):
+    sent = []
+    original = serve_app.EDIT_BODY_LIMIT
+    monkeypatch.setattr(serve_app, "EDIT_BODY_LIMIT", 1024)
+
+    async def receive():
+        pytest.fail("content length should be rejected without reading body")
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {"type": "http", "method": "POST", "path": "/v1/images/edits",
+             "headers": [(b"content-length", b"1025")], "query_string": b"",
+             "http_version": "1.1", "scheme": "http", "server": ("test", 80),
+             "client": ("127.0.0.1", 1000), "root_path": ""}
+    asyncio.run(serve_app.app(scope, receive, send))
+    assert sent[0]["status"] == 413
+    assert b"50 MiB" in sent[1]["body"]
+    assert original > 0
 
 
 def test_api_wrong_model_kind(monkeypatch):
