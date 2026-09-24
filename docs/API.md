@@ -195,12 +195,14 @@ Returns the configuration and live diagnostics of this local server process:
 {
   "model": "bonsai2",
   "settings": {"max_queued": 4, "max_tokens_cap": 16384},
+  "capabilities": {"images": true, "chat_protocol": 1},
   "mlx": {
     "active_memory_bytes": 13200000000,
     "cache_memory_bytes": 1200000000,
     "last_peak_memory_bytes": 13900000000
   },
   "runtime": {
+    "engine_version": 1,
     "uptime_s": 3601,
     "pid": 12345,
     "ready": true,
@@ -209,7 +211,15 @@ Returns the configuration and live diagnostics of this local server process:
     "requests": 42,
     "prompt_tokens": 98304,
     "tokens_generated": 183456,
-    "mlx_version": "0.32.0"
+    "mlx_version": "0.32.0",
+    "current_request": null,
+    "last_request": {
+      "source": "chat",
+      "duration_s": 4.8,
+      "prompt_tokens": 230,
+      "output_tokens": 91,
+      "outcome": "completed"
+    }
   }
 }
 ```
@@ -220,6 +230,16 @@ the stable peak snapshot from the last finished generation attempt (or model
 load before the first request). Config edits after startup are not reflected
 until restart. `mlxh status` presents this endpoint as a table and `mlxh status
 --json` adds the locally discovered `port` to the payload.
+
+`current_request` identifies live work and includes its source and elapsed
+time; `last_request` is a single completion/failure/timeout/cancellation
+snapshot, not retained history. The version and capability fields are used by
+the terminal client to reject an old server cleanly.
+
+`POST /mlxh/generate` and `DELETE /mlxh/requests/{id}` are versioned,
+localhost-only implementation details used by `mlxh chat`; they are not public
+compatibility endpoints. The private request body is capped at 36 MiB before
+JSON parsing, and decoded images are capped at 25 MiB each.
 
 ## Not implemented
 

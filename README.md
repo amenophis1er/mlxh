@@ -91,6 +91,13 @@ Set persistently with `mlxh config <key> <value>`, or per run with
 `mlxh status` shows live memory, queue, traffic, and process statistics for
 the local server; use `mlxh status --json` for scripts.
 
+Chat, coding agents, and REST clients all use the same instrumented server
+engine. `mlxh chat` reuses a compatible same-model server when one is running;
+otherwise it starts a temporary server and stops it on exit. This keeps one
+model copy in memory and makes chat activity visible in `mlxh status`. If the
+configured port is serving another model, chat refuses instead of silently
+talking to the wrong one.
+
 To keep one model available across logins, opt in with
 `mlxh config service_model bonsai2 && mlxh service install`. The per-user
 LaunchAgent always binds to localhost and can be restarted with `mlxh service
