@@ -37,6 +37,13 @@ if [ ! -x "$PREFIX/venv/bin/python" ]; then
 fi
 uv pip install -p "$PREFIX/venv/bin/python" --reinstall-package mlxh "$SRC"
 
+# An existing optional image runtime carries its own mlxh code. Synchronize
+# after every upgrade; startup checks refuse stale code if this repair fails.
+if [ -e "$PREFIX/images/current" ]; then
+  MLXH_HOME="$PREFIX" "$PREFIX/venv/bin/mlxh" images install || \
+    echo "Image runtime needs repair: mlxh images install"
+fi
+
 cat > "$BIN/mlxh" <<EOF
 #!/bin/bash
 export MLXH_HOME="$PREFIX"

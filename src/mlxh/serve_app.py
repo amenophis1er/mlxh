@@ -13,6 +13,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -30,6 +31,7 @@ from .engine import (
     compute_logprobs as _compute_logprobs,
 )
 from .toolcalls import parse_tool_calls
+from .images import BODY_LIMIT as IMAGE_BODY_LIMIT, ImageError, parse_request as parse_image_request
 
 PRIVATE_BODY_LIMIT = 36 * 1024 * 1024
 
@@ -39,21 +41,25 @@ class _BodyTooLarge(Exception):
 
 
 class PrivateBodyLimitMiddleware:
-    """Reject oversized private-chat bodies before FastAPI parses JSON."""
+    """Reject oversized chat and Images bodies before FastAPI parses JSON."""
 
     def __init__(self, app, limit=PRIVATE_BODY_LIMIT):
         self.app, self.limit = app, limit
 
     async def __call__(self, scope, receive, send):
-        if scope.get("type") != "http" or scope.get("path") != "/mlxh/generate":
+        is_image = scope.get("path") == "/v1/images/generations"
+        if scope.get("type") != "http" or scope.get("path") not in ("/mlxh/generate", "/v1/images/generations"):
             await self.app(scope, receive, send)
             return
+        limit = IMAGE_BODY_LIMIT if is_image else self.limit
+        def oversized():
+            if is_image:
+                return JSONResponse(ImageError(413, "request body exceeds 256 KiB", code="body_too_large").envelope(), 413)
+            return JSONResponse({"detail": "request body exceeds 36 MiB"}, 413)
         headers = dict(scope.get("headers") or [])
         try:
-            if int(headers.get(b"content-length", b"0")) > self.limit:
-                await JSONResponse({"detail": "request body exceeds 36 MiB"}, 413)(
-                    scope, receive, send
-                )
+            if int(headers.get(b"content-length", b"0")) > limit:
+                await oversized()(scope, receive, send)
                 return
         except ValueError:
             pass
@@ -64,18 +70,25 @@ class PrivateBodyLimitMiddleware:
             message = await receive()
             if message.get("type") == "http.request":
                 received += len(message.get("body", b""))
-                if received > self.limit:
+                if received > limit:
                     raise _BodyTooLarge
             return message
 
         try:
             await self.app(scope, limited_receive, send)
         except _BodyTooLarge:
-            await JSONResponse({"detail": "request body exceeds 36 MiB"}, 413)(
-                scope, receive, send
-            )
+            await oversized()(scope, receive, send)
 
-app = FastAPI(title="mlxh")
+@asynccontextmanager
+async def lifespan(_app):
+    try:
+        yield
+    finally:
+        if getattr(engine, "model_kind", None) == "image":
+            await run_in_threadpool(engine.stop)
+
+
+app = FastAPI(title="mlxh", lifespan=lifespan)
 app.add_middleware(PrivateBodyLimitMiddleware)
 engine = None
 MODEL_ID = "model"
@@ -88,7 +101,50 @@ SETTINGS = {
     "max_prompt_tokens": 8192,  # reject bigger prompts (KV cache = memory); 0 = off
     "prompt_cache": True,   # reuse KV blocks across requests (agents: huge TTFT win)
     "thinking": "auto",     # reasoning mode: auto (model default) / on / off
+    "max_image_pixels": 4194304,
+    "image_steps": 0,
 }
+
+
+@app.post("/v1/images/generations")
+async def image_generations(request: Request):
+    job = None
+    completed = False
+    current_engine = engine
+    try:
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeError):
+            raise ImageError(400, "invalid JSON request") from None
+        if current_engine is None:
+            raise ImageError(503, "model engine is not configured", code="not_ready")
+        if getattr(current_engine, "model_kind", "language") != "image":
+            raise ImageError(400, "this model does not support image generation",
+                             "model", "unsupported_model_operation")
+        parsed = parse_image_request(body, current_engine.model_id, current_engine.settings)
+        # Image admission never waits for readiness; this is a short locked
+        # enqueue, and cannot orphan a job if the request task is cancelled.
+        job = current_engine.submit(parsed)
+        created = int(time.time())
+        while True:
+            if await request.is_disconnected():
+                return JSONResponse({}, 499)
+            try:
+                result = await run_in_threadpool(job.out.get, True, 0.1)
+            except queue.Empty:
+                continue
+            completed = True
+            if isinstance(result, ImageError):
+                raise result
+            return JSONResponse(await run_in_threadpool(result.response, created))
+    except ImageError as exc:
+        return JSONResponse(exc.envelope(), exc.status_code)
+    except EngineError:
+        exc = ImageError(503, "image engine unavailable or queue full", code="server_busy")
+        return JSONResponse(exc.envelope(), 503)
+    finally:
+        if job is not None and not completed:
+            current_engine.cancel(job.request_id, expected_source="openai-images")
 
 
 def _request(body, source="openai"):
@@ -437,6 +493,8 @@ def openai_responses(body: dict):
 
 @app.post("/v1/messages/count_tokens")
 def anthropic_count_tokens(body: dict):
+    if getattr(engine, "model_kind", None) == "image":
+        raise HTTPException(400, "this model generates images and does not support chat")
     # Rough estimate; enough for agents that budget context with it.
     text = json.dumps(body.get("messages", [])) + json.dumps(body.get("system", ""))
     return {"input_tokens": max(1, len(text) // 4)}
@@ -703,6 +761,8 @@ def main():
     ap.add_argument("--prompt-cache", default=str(SETTINGS["prompt_cache"]))
     ap.add_argument("--thinking", choices=["auto", "on", "off"],
                     default=SETTINGS["thinking"])
+    ap.add_argument("--max-image-pixels", type=int, default=4194304)
+    ap.add_argument("--image-steps", type=int, default=0)
     args = ap.parse_args()
     SETTINGS.update(
         max_queued=args.max_queued, max_tokens_cap=args.max_tokens_cap,
@@ -710,9 +770,19 @@ def main():
         gen_timeout_s=args.gen_timeout_s, max_prompt_tokens=args.max_prompt_tokens,
         prompt_cache=str(args.prompt_cache).lower() in ("1", "true", "on", "yes"),
         thinking=args.thinking,
+        max_image_pixels=args.max_image_pixels, image_steps=args.image_steps,
     )
     MODEL_ID = args.name or Path(args.model_path).name
-    engine = InferenceEngine(
+    from .image_models import model_kind
+    from .image_engine import ImageEngine
+    try:
+        kind = model_kind(args.model_path)
+    except ValueError as exc:
+        ap.error(f"unsupported model metadata: {exc}")
+    engine_class = ImageEngine if kind == "image" else InferenceEngine
+    if not 65536 <= args.max_image_pixels <= 4194304 or not 0 <= args.image_steps <= 100:
+        ap.error("max-image-pixels must be 65536..4194304 and image-steps 0..100")
+    engine = engine_class(
         args.model_path, MODEL_ID, SETTINGS, exit_on_load_failure=True
     )
     engine.start()

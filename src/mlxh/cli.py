@@ -8,6 +8,8 @@ Commands:
   mlxh mv <name> <new-name>           rename a model
   mlxh rm <name>                      remove a model (links: symlink only)
   mlxh serve <name> [--port N ...]    OpenAI + Anthropic compatible API server
+  mlxh images install                install optional local image generation
+  mlxh image [model] [prompt...]     generate images interactively or once
   mlxh status [--json]                show live stats of the local server
   mlxh service <action>               manage the login LaunchAgent
   mlxh launch <agent> [--model NAME]  run a coding agent (claude, codex, pi)
@@ -33,6 +35,8 @@ Config keys (mlxh config <key> <value>):
   thinking            model reasoning: auto / on / off (auto)
   chat_tools          load ~/.mlxh/tools.py in chat by default (false)
   service_model       model loaded by `mlxh service install` (unset)
+  max_image_pixels    image width * height ceiling (4194304)
+  image_steps         denoising steps, 0 = model default (0)
 
 State lives under $MLXH_HOME (default ~/.mlxh): venv, app code, config,
 models, HF cache. Uninstall removes exactly that plus the launcher.
@@ -52,6 +56,9 @@ import time
 from pathlib import Path
 
 from . import ui
+from .image_models import (
+    image_metadata, model_kind, IMAGE_REPO, IMAGE_REVISION, IMAGE_CATALOG,
+)
 
 HOME = Path(os.environ.get("MLXH_HOME", Path.home() / ".mlxh"))
 CONFIG = HOME / "config.json"
@@ -69,6 +76,8 @@ DEFAULTS = {
     "thinking": "auto",
     "chat_tools": False,
     "service_model": "",
+    "max_image_pixels": 4194304,
+    "image_steps": 0,
 }
 def _bool(v):
     if v.lower() in ("1", "true", "on", "yes"):
@@ -83,6 +92,7 @@ KEY_TYPES = {
     "max_tokens_cap": int, "memory_limit_gb": float, "cache_limit_gb": float,
     "gen_timeout_s": int, "max_prompt_tokens": int, "prompt_cache": _bool,
     "thinking": str, "chat_tools": _bool, "service_model": str,
+    "max_image_pixels": int, "image_steps": int,
 }
 
 SERVICE_LABEL = "com.mlxh.serve"
@@ -107,7 +117,19 @@ def models_dir(cfg):
 
 
 def is_model(path):
-    return (path / "config.json").is_file()
+    try:
+        return image_metadata(path) is not None or (path / "config.json").is_file()
+    except ValueError:
+        # Keep malformed image packs discoverable so commands can explain the
+        # metadata error instead of making the model silently disappear.
+        return (path / ".mlxh.json").is_file() or (path / "config.json").is_file()
+
+
+def checked_model_kind(path):
+    try:
+        return model_kind(path)
+    except ValueError as exc:
+        ui.fail("unsupported model metadata", str(exc))
 
 
 def model_supports_images(path):
@@ -235,21 +257,42 @@ def total_ram_bytes():
             return 0
 
 
-def do_pull(cfg, repo, name, force=False):
+def do_pull(cfg, repo, name, force=False, kind="auto", backend=None):
+    image_spec = IMAGE_CATALOG.get(repo)
+    image = image_spec is not None
+    if backend and (not image or backend != image_spec["backend"]):
+        ui.fail(f"backend '{backend}' is not supported for repository '{repo}'",
+                hint="supported image repositories: " + ", ".join(IMAGE_CATALOG))
+    if kind == "image" and not image:
+        ui.fail("unsupported image repository",
+                hint="supported image repositories: " + ", ".join(IMAGE_CATALOG))
+    if kind == "language" and image:
+        ui.fail("this repository contains an image generation model")
     dest = models_dir(cfg) / name
     if dest.exists():
         ui.fail(f"'{name}' already exists",
                 f"at {dest}",
                 hint=f"pick another with --name, or `mlxh rm {name}` first")
+    if image:
+        _ensure_image_runtime(interactive=True)
     dest.parent.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("HF_HOME", str(HOME / "hf-cache"))
     from datetime import datetime, timezone
     from huggingface_hub import HfApi, snapshot_download
 
+    fixed_revision = IMAGE_REVISION if repo == IMAGE_REPO else None
+    repo_info = None
     try:
-        size = sum(s.size or 0 for s in
-                   HfApi().model_info(repo, files_metadata=True).siblings)
-    except Exception:
+        repo_info = HfApi().model_info(repo, files_metadata=True,
+                                      **({"revision": fixed_revision} if fixed_revision else {}))
+        if not image and (getattr(repo_info, "pipeline_tag", None) == "text-to-image"
+                          or getattr(repo_info, "library_name", None) == "diffusers"):
+            ui.fail("unsupported image repository", hint=f"verified model: {IMAGE_REPO}")
+        size = sum(s.size or 0 for s in repo_info.siblings)
+    except Exception as exc:
+        if image:
+            ui.fail("could not inspect image repository", f"{type(exc).__name__}: {exc}",
+                    hint="check Hugging Face access and try again")
         size = 0  # can't size it (offline, gated, ...): proceed without guardrails
     if size:
         free = shutil.disk_usage(dest.parent).free
@@ -265,21 +308,24 @@ def do_pull(cfg, repo, name, force=False):
                     hint="--force downloads anyway (e.g. for another machine)")
 
     ui.step(f"downloading {repo}{f' ({size / 1e9:.1f} GB)' if size else ''}")
+    revision = fixed_revision or getattr(repo_info, "sha", None) or ""
     try:
-        snapshot_download(repo, local_dir=str(dest))
+        snapshot_download(repo, local_dir=str(dest), **({"revision": revision} if image else {}))
     except Exception as e:
         shutil.rmtree(dest, ignore_errors=True)
         ui.fail("download failed",
                 f"{type(e).__name__}: {e}",
                 hint="check the repo id with `mlxh search`; gated repos need `hf auth login`")
-    try:
-        revision = HfApi().model_info(repo).sha or ""
-    except Exception:
-        revision = ""
+    if not image:
+        try:
+            revision = HfApi().model_info(repo).sha or ""
+        except Exception:
+            revision = ""
     (dest / ".mlxh.json").write_text(json.dumps({
         "repo": repo,
         "revision": revision,
         "pulled_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        **({"kind": "image", **image_spec} if image else {}),
     }, indent=2))
     ui.ok(f"pulled {repo}@{revision[:7]} as '{name}'")
 
@@ -287,8 +333,41 @@ def do_pull(cfg, repo, name, force=False):
 def cmd_pull(args):
     cfg = load_config()
     name = args.name or args.repo.split("/")[-1]
-    do_pull(cfg, args.repo, name, force=args.force)
-    ui.note(f"chat: mlxh chat {name}    serve: mlxh serve {name}")
+    do_pull(cfg, args.repo, name, force=args.force,
+            kind=getattr(args, "kind", "auto"), backend=getattr(args, "backend", None))
+    ui.note(f"serve: mlxh serve {name}" if model_kind(models_dir(cfg) / name) == "image"
+            else f"chat: mlxh chat {name}    serve: mlxh serve {name}")
+
+
+def _ensure_image_runtime(interactive=False):
+    from .image_runtime import runtime_python, install
+    try:
+        return runtime_python(HOME)
+    except RuntimeError:
+        if interactive and sys.stdin.isatty() and sys.stdout.isatty():
+            ui.note("Image support needs a pinned runtime (several hundred MB plus dependencies).")
+            if input("Install image support now? [y/N] ").strip().lower() in ("y", "yes"):
+                try:
+                    install(HOME)
+                    return runtime_python(HOME)
+                except RuntimeError as exc:
+                    ui.fail(str(exc))
+        ui.fail("install image support with: mlxh images install")
+
+
+def cmd_images(_args):
+    from .image_runtime import install
+    try:
+        install(HOME)
+    except RuntimeError as exc:
+        ui.fail(str(exc))
+    ui.ok("image support is installed")
+
+
+def _require_language(path):
+    if checked_model_kind(path) == "image":
+        ui.fail("this model generates images and does not support chat",
+                hint="use mlxh serve and /v1/images/generations")
 
 
 def repo_installed_as(cfg, repo):
@@ -314,8 +393,9 @@ def cmd_run(args):
         else:
             name = name.split("/")[-1]
             if not is_model(models_dir(cfg) / name):
-                do_pull(cfg, args.target, name, force=args.force)
+                do_pull(cfg, args.target, name, force=args.force, kind="language")
     path = resolve(cfg, name)
+    _require_language(path)
     os.execv(sys.executable, [
         sys.executable, "-m", "mlxh.chat_cli", "--model-path", path,
         *_chat_args(cfg, args.rest),
@@ -353,10 +433,18 @@ def cmd_list(_args):
     nw = max(len("NAME"), max(len(r[0]) for r in rows))
     sw = max(len("SOURCE"), max(len(r[3]) for r in rows))
     cols = shutil.get_terminal_size().columns if sys.stdout.isatty() else 10**9
-    print(ui.dim(f"{'NAME':{nw}}  {'KIND':6} {'SIZE':>8}  SOURCE"))
+    print(ui.dim(f"{'NAME':{nw}}  {'INSTALL':6} {'KIND':12} {'SIZE':>8}  SOURCE"))
     home = str(Path.home())
     for name, kind, size, source, target in rows:
-        line = f"{name:{nw}}  {kind:6} {size:>8}  {source:{sw}}"
+        try:
+            meta = image_metadata(models[name])
+            quantization = meta.get("quantization_bits") if meta else None
+            precision = f"{quantization}bit" if quantization else "full"
+            family = f"image/{precision}" if meta else "language"
+        except ValueError as exc:
+            family = "unsupported"
+            ui.note(f"{name}: unsupported model metadata: {exc}")
+        line = f"{name:{nw}}  {kind:6} {family:12} {size:>8}  {source:{sw}}"
         if target:
             if target.startswith(home):
                 target = "~" + target[len(home):]
@@ -406,8 +494,9 @@ def serve_argv(cfg, name, path, overrides=None):
     def pick(key):
         return o.get(key) if o.get(key) is not None else cfg[key]
 
+    python = _ensure_image_runtime() if checked_model_kind(path) == "image" else sys.executable
     return [
-        sys.executable, "-m", "mlxh.serve_app",
+        python, *(["-I"] if python != sys.executable else []), "-m", "mlxh.serve_app",
         "--model-path", path, "--name", name,
         "--port", str(pick("port")),
         "--host", str(pick("host")),
@@ -419,6 +508,8 @@ def serve_argv(cfg, name, path, overrides=None):
         "--max-prompt-tokens", str(pick("max_prompt_tokens")),
         "--prompt-cache", str(pick("prompt_cache")),
         "--thinking", str(pick("thinking")),
+        "--max-image-pixels", str(pick("max_image_pixels")),
+        "--image-steps", str(pick("image_steps")),
     ]
 
 
@@ -429,8 +520,10 @@ def cmd_serve(args):
     overrides = {k: getattr(args, k) for k in
                  ("port", "host", "max_queued", "max_tokens_cap",
                   "memory_limit_gb", "cache_limit_gb", "gen_timeout_s",
-                  "max_prompt_tokens", "prompt_cache", "thinking")}
-    os.execv(sys.executable, serve_argv(cfg, name, path, overrides))
+                  "max_prompt_tokens", "prompt_cache", "thinking",
+                  "max_image_pixels", "image_steps")}
+    argv = serve_argv(cfg, name, path, overrides)
+    os.execv(argv[0], argv)
 
 
 def _fetch_info(port):
@@ -509,6 +602,9 @@ def cmd_status(args):
     ]
     headers = ["MODEL", "PID", "UPTIME", "STATE", "QUEUE", "REQ",
                "PROMPT", "OUTPUT", "ACTIVE", "CACHE", "PEAK"]
+    if info.get("model_kind") == "image":
+        headers[6:8] = ["IMAGES"]
+        values[6:8] = [_human_value(runtime.get("images_generated"))]
     widths = [max(len(header), len(str(value)))
               for header, value in zip(headers, values)]
     print(ui.dim("  ".join(f"{header:{width}}"
@@ -848,6 +944,7 @@ def cmd_launch(args):
 
     name = args.model or pick_model(cfg, f"use with {args.agent}")
     path = resolve(cfg, name)
+    _require_language(path)
     port = args.port or cfg["port"]
     env_extra, agent_args = AGENTS[args.agent](port, name)
     if args.no_mcp:
@@ -867,6 +964,8 @@ def cmd_launch(args):
         cfg, name, path, port, require_same_model=False,
         require_chat_protocol=False,
     )
+    if info.get("model_kind") == "image":
+        ui.fail("the running server generates images and cannot serve a coding agent")
     if started is None:
         # A running server keeps the settings it started with; warn when the
         # config has moved on (the classic: raising max_prompt_tokens after
@@ -914,6 +1013,7 @@ def cmd_chat(args):
     cfg = load_config()
     name = args.name or pick_model(cfg, "chat with")
     path = resolve(cfg, name)
+    _require_language(path)
     port = cfg["port"]
     _info, started = _ensure_local_server(
         cfg, name, path, port, require_same_model=True,
@@ -936,6 +1036,225 @@ def cmd_chat(args):
             "--base-url", f"http://127.0.0.1:{port}", "--model", name,
             *_chat_args(cfg, args.rest),
         ])
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+        if started:
+            _stop_owned_server(started)
+            ui.note("stopped the mlxh server it started")
+
+
+def _pick_image_model(cfg):
+    available = []
+    for name, path in discover(cfg).items():
+        try:
+            if image_metadata(path):
+                available.append(name)
+        except ValueError as exc:
+            ui.note(f"skipping {name}: unsupported image metadata ({exc})")
+    if not available:
+        ui.fail("no supported image models installed",
+                hint="mlxh pull black-forest-labs/FLUX.2-klein-4B --kind image")
+    if len(available) == 1:
+        ui.note(f"using {available[0]}")
+        return available[0]
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        ui.fail("which image model do you want to use?",
+                f"available: {', '.join(available)}")
+    paths = discover(cfg)
+    idx = ui.select("select an image model  (↑/↓, enter)", available,
+                    [source_of(paths[name]) for name in available])
+    return available[idx]
+
+
+def _image_api_request(port, model, prompt, *, size, seed, steps, output_format):
+    import base64
+    import urllib.error
+    import urllib.request
+
+    body = {"model": model, "prompt": prompt, "size": size,
+            "output_format": output_format}
+    if seed is not None:
+        body["seed"] = seed
+    if steps is not None:
+        body["steps"] = steps
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/v1/images/generations",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=3600) as response:
+            result = json.load(response)
+    except urllib.error.HTTPError as exc:
+        try:
+            error = json.loads(exc.read()).get("error", {}).get("message", str(exc))
+        except (ValueError, AttributeError):
+            error = str(exc)
+        raise RuntimeError(f"image API returned HTTP {exc.code}: {error}") from None
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"could not reach the image server: {exc.reason}") from None
+    return (base64.b64decode(result["data"][0]["b64_json"]),
+            result.get("size", size), result.get("mlxh", {}))
+
+
+def _save_cli_image(data, prompt, output_dir, output_format, explicit=None, force=False):
+    import re
+
+    output_dir = Path(output_dir).expanduser()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if explicit:
+        target = Path(explicit).expanduser()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists() and not force:
+            ui.fail(f"refusing to overwrite {target}", hint="use --force to replace it")
+        try:
+            with target.open("xb") as image_file:
+                image_file.write(data)
+        except FileExistsError:
+            if not force:
+                ui.fail(f"refusing to overwrite {target}", hint="use --force to replace it")
+            target.write_bytes(data)
+        return target
+
+    stem = re.sub(r"[^\w-]+", "-", prompt.casefold(), flags=re.UNICODE).strip("-_")[:64].rstrip("-_")
+    stem = stem or "image"
+    extension = "jpg" if output_format == "jpeg" else output_format
+    for number in range(1, 1_000_000):
+        suffix = "" if number == 1 else f"-{number}"
+        target = output_dir / f"{stem}{suffix}.{extension}"
+        try:
+            with target.open("xb") as image_file:
+                image_file.write(data)
+            return target
+        except FileExistsError:
+            continue
+    ui.fail(f"could not find an unused filename for {stem}.{extension}")
+
+
+def _image_help():
+    print("Enter a prompt to generate; commands: /size auto|WIDTHxHEIGHT, "
+          "/seed random|N, /steps default|1..100, /format png|jpeg|webp, "
+          "/output DIR, /help, /exit")
+
+
+def cmd_image(args):
+    import re
+
+    cfg = load_config()
+    name = args.model or _pick_image_model(cfg)
+    path = resolve(cfg, name)
+    if checked_model_kind(path) != "image":
+        ui.fail(f"'{name}' is not an image generation model")
+    prompts = " ".join(args.prompt).strip()
+    if args.output and not prompts:
+        ui.fail("--output requires a one-shot prompt")
+    if args.force and not args.output:
+        ui.fail("--force requires --output")
+    if args.output and Path(args.output).expanduser().exists() and not args.force:
+        ui.fail(f"refusing to overwrite {Path(args.output).expanduser()}",
+                hint="use --force to replace it")
+
+    port = cfg["port"]
+    info, started = _ensure_local_server(
+        cfg, name, path, port, require_same_model=True,
+    )
+    if info.get("model_kind") != "image":
+        if started:
+            _stop_owned_server(started)
+        ui.fail("the running server is not an image generation server")
+
+    previous = {}
+
+    def stop_for_signal(signum, _frame):
+        _stop_owned_server(started)
+        raise SystemExit(128 + signum)
+
+    if started:
+        for signum in (signal.SIGTERM, signal.SIGHUP):
+            previous[signum] = signal.getsignal(signum)
+            signal.signal(signum, stop_for_signal)
+
+    state = {
+        "size": args.size, "seed": args.seed, "steps": args.steps,
+        "format": args.output_format, "output_dir": Path(args.output_dir or Path.cwd()),
+    }
+
+    def generate(prompt, explicit=None, force=False):
+        ui.step("generating image...")
+        data, resolved_size, details = _image_api_request(
+            port, name, prompt, size=state["size"], seed=state["seed"],
+            steps=state["steps"], output_format=state["format"],
+        )
+        target = _save_cli_image(
+            data, prompt, state["output_dir"], state["format"], explicit, force,
+        )
+        seed_text = f", seed {details['seed']}" if details.get("seed") is not None else ""
+        steps_text = f", {details['steps']} steps" if details.get("steps") is not None else ""
+        ui.ok(f"saved {target} ({resolved_size}{seed_text}{steps_text})")
+
+    try:
+        if prompts:
+            generate(prompts, args.output, args.force)
+            return
+        if not sys.stdin.isatty():
+            ui.fail("provide a prompt or run `mlxh image` in a terminal")
+        _image_help()
+        while True:
+            try:
+                line = input("image> ").strip()
+            except EOFError:
+                print()
+                break
+            if not line:
+                continue
+            if not line.startswith("/"):
+                try:
+                    generate(line)
+                except RuntimeError as exc:
+                    print(f"error: {exc}", file=sys.stderr)
+                continue
+            command, _, value = line.partition(" ")
+            value = value.strip()
+            try:
+                if command in ("/exit", "/quit"):
+                    break
+                if command == "/help":
+                    _image_help()
+                elif command == "/size":
+                    if value not in ("auto",) and not re.fullmatch(r"\d{1,4}x\d{1,4}", value):
+                        print("usage: /size auto|WIDTHxHEIGHT")
+                    else:
+                        state["size"] = value
+                        ui.note(f"size set to {value}")
+                elif command == "/seed":
+                    state["seed"] = None if not value or value == "random" else int(value)
+                    if state["seed"] is not None and not 0 <= state["seed"] < 2**32:
+                        raise ValueError
+                    ui.note(f"seed set to {state['seed'] if state['seed'] is not None else 'random'}")
+                elif command == "/steps":
+                    state["steps"] = None if not value or value == "default" else int(value)
+                    if state["steps"] is not None and not 1 <= state["steps"] <= 100:
+                        raise ValueError
+                    ui.note(f"steps set to {state['steps'] if state['steps'] is not None else 'model default'}")
+                elif command == "/format":
+                    if value not in ("png", "jpeg", "webp"):
+                        print("usage: /format png|jpeg|webp")
+                    else:
+                        state["format"] = value
+                        ui.note(f"format set to {value}")
+                elif command == "/output":
+                    if not value:
+                        print("usage: /output DIR")
+                    else:
+                        state["output_dir"] = Path(value).expanduser()
+                        ui.note(f"output directory set to {state['output_dir']}")
+                else:
+                    print("unknown command; use /help")
+            except ValueError:
+                print("invalid value; use /help for command syntax")
+    except RuntimeError as exc:
+        ui.fail(str(exc))
     finally:
         for signum, handler in previous.items():
             signal.signal(signum, handler)
@@ -987,11 +1306,12 @@ def cmd_home(parser):
         labels.append(label)
         notes.append(note if installed else f"{note} — not installed")
         actions.append(("launch", agent))
-    labels += ["Chat", "Serve", "List models"]
+    labels += ["Chat", "Generate image", "Serve", "List models"]
     notes += ["talk to a model in this terminal",
+              "generate with an installed image model",
               "OpenAI + Anthropic API server",
               "what's installed, sizes, sources"]
-    actions += [("chat", None), ("serve", None), ("list", None)]
+    actions += [("chat", None), ("image", None), ("serve", None), ("list", None)]
 
     idx = ui.select("what do you want to do?  (↑/↓ + enter, q quits)", labels, notes)
     kind, agent = actions[idx]
@@ -1000,13 +1320,18 @@ def cmd_home(parser):
                       no_mcp=(agent == "claude"), rest=[]))
     elif kind == "chat":
         cmd_chat(NS(name=None, rest=[]))
+    elif kind == "image":
+        cmd_image(NS(model=None, prompt=[], output=None, output_dir=None,
+                     force=False, size="auto", seed=None, steps=None,
+                     output_format="png"))
     elif kind == "list":
         cmd_list(None)
     else:
         cmd_serve(NS(name=None, port=None, host=None, max_queued=None,
                      max_tokens_cap=None, memory_limit_gb=None,
                      cache_limit_gb=None, gen_timeout_s=None,
-                     max_prompt_tokens=None, prompt_cache=None, thinking=None))
+                     max_prompt_tokens=None, prompt_cache=None, thinking=None,
+                     max_image_pixels=None, image_steps=None))
 
 
 def cmd_uninstall(args):
@@ -1053,9 +1378,15 @@ def main():
     p = sub.add_parser("pull", help="download a model from Hugging Face")
     p.add_argument("repo")
     p.add_argument("--name")
+    p.add_argument("--kind", choices=["auto", "language", "image"], default="auto")
+    p.add_argument("--backend", choices=["mflux"])
     p.add_argument("--force", action="store_true",
                    help="download even if it exceeds this machine's memory")
     p.set_defaults(fn=cmd_pull)
+
+    p = sub.add_parser("images", help="manage optional image generation support")
+    p.add_argument("action", choices=["install"])
+    p.set_defaults(fn=cmd_images)
 
     p = sub.add_parser("link", help="symlink an existing local model directory in")
     p.add_argument("path")
@@ -1086,6 +1417,8 @@ def main():
     p.add_argument("--max-prompt-tokens", type=int, dest="max_prompt_tokens")
     p.add_argument("--prompt-cache", dest="prompt_cache")
     p.add_argument("--thinking", choices=["auto", "on", "off"], dest="thinking")
+    p.add_argument("--max-image-pixels", type=int)
+    p.add_argument("--image-steps", type=int)
     p.set_defaults(fn=cmd_serve)
 
     p = sub.add_parser("status", help="show live stats of the running server")
@@ -1115,6 +1448,18 @@ def main():
     p.add_argument("name", nargs="?")
     p.add_argument("rest", nargs=argparse.REMAINDER)
     p.set_defaults(fn=cmd_chat)
+
+    p = sub.add_parser("image", help="generate images interactively or from one prompt")
+    p.add_argument("model", nargs="?", help="installed image model (prompts to choose if omitted)")
+    p.add_argument("prompt", nargs="*", help="prompt text; omit for interactive mode")
+    p.add_argument("--output", help="exact output path for one-shot generation (never overwrites by default)")
+    p.add_argument("--output-dir", help="directory for generated images (default: current directory)")
+    p.add_argument("--force", action="store_true", help="allow overwriting an explicit --output path")
+    p.add_argument("--size", default="auto", help="auto or WIDTHxHEIGHT (default: auto)")
+    p.add_argument("--seed", type=int, help="fixed seed (default: random)")
+    p.add_argument("--steps", type=int, help="denoising steps (default: model default)")
+    p.add_argument("--output-format", choices=["png", "jpeg", "webp"], default="png")
+    p.set_defaults(fn=cmd_image)
 
     p = sub.add_parser("config", help="show or set config")
     p.add_argument("key", nargs="?")

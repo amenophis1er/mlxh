@@ -39,6 +39,9 @@ dependencies = [
 Homepage = "https://github.com/amenophis1er/mlxh"
 Issues = "https://github.com/amenophis1er/mlxh/issues"
 
+[project.optional-dependencies]
+images = ["mflux==0.20.0"]
+
 [project.scripts]
 mlxh = "mlxh.cli:main"
 

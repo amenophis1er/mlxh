@@ -48,6 +48,65 @@ def test_discover_and_resolve(mdir):
         cli.resolve(cfg, "missing")
 
 
+def test_invalid_image_metadata_remains_discoverable(mdir, capsys):
+    model = make_model(mdir, "bad-image")
+    (model / ".mlxh.json").write_text(json.dumps({"kind": "image", "backend": "unknown"}))
+    cfg = cli.load_config()
+    assert "bad-image" in cli.discover(cfg)
+    with pytest.raises(SystemExit):
+        cli.serve_argv(cfg, "bad-image", str(model))
+    assert "unsupported model metadata" in capsys.readouterr().err
+
+
+def test_run_rejects_image_repo_before_pull(mdir, monkeypatch):
+    calls = []
+    monkeypatch.setattr(cli, "load_config", lambda: {**cli.DEFAULTS, "models_dir": str(mdir)})
+    monkeypatch.setattr(cli, "repo_installed_as", lambda *args: None)
+    monkeypatch.setattr(cli, "do_pull", lambda *args, **kwargs: calls.append(kwargs))
+    monkeypatch.setattr(cli.os, "execv", lambda *args: pytest.fail("must not launch chat"))
+    with pytest.raises(SystemExit):
+        cli.cmd_run(NS(target=cli.IMAGE_REPO, force=False, rest=[]))
+    assert calls == [{"force": False, "kind": "language"}]
+
+
+def test_cli_image_saves_without_colliding_and_honors_explicit_overwrite(tmp_path):
+    first = cli._save_cli_image(b"one", "Fox bookstore", tmp_path, "png")
+    second = cli._save_cli_image(b"two", "Fox bookstore", tmp_path, "png")
+    assert first.name == "fox-bookstore.png"
+    assert second.name == "fox-bookstore-2.png"
+    assert first.read_bytes() == b"one" and second.read_bytes() == b"two"
+
+    with pytest.raises(SystemExit):
+        cli._save_cli_image(b"three", "ignored", tmp_path, "png", explicit=first)
+    assert cli._save_cli_image(b"three", "ignored", tmp_path, "png",
+                               explicit=first, force=True) == first
+    assert first.read_bytes() == b"three"
+
+
+def test_one_shot_image_cli_uses_server_and_requested_options(tmp_path, monkeypatch):
+    cfg = {**cli.DEFAULTS, "models_dir": str(tmp_path), "port": 9876}
+    model_path = tmp_path / "klein"
+    model_path.mkdir()
+    output = tmp_path / "out.png"
+    seen = {}
+    monkeypatch.setattr(cli, "load_config", lambda: cfg)
+    monkeypatch.setattr(cli, "resolve", lambda *_: str(model_path))
+    monkeypatch.setattr(cli, "checked_model_kind", lambda _: "image")
+    monkeypatch.setattr(cli, "_ensure_local_server", lambda *a, **k: ({"model_kind": "image"}, None))
+
+    def generate(port, model, prompt, **kwargs):
+        seen.update(port=port, model=model, prompt=prompt, **kwargs)
+        return b"image bytes", "768x1024", {"seed": 42, "steps": 4}
+
+    monkeypatch.setattr(cli, "_image_api_request", generate)
+    cli.cmd_image(NS(model="klein", prompt=["fox", "reading"], output=str(output),
+                     output_dir=None, force=False, size="768x1024", seed=42,
+                     steps=4, output_format="png"))
+    assert output.read_bytes() == b"image bytes"
+    assert seen == {"port": 9876, "model": "klein", "prompt": "fox reading",
+                    "size": "768x1024", "seed": 42, "steps": 4, "output_format": "png"}
+
+
 def test_model_supports_images_from_local_config(mdir):
     prism_vision = make_model(mdir, "prism-vision")
     prism_vision.joinpath("config.json").write_text(json.dumps({

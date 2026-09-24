@@ -247,3 +247,9 @@ JSON parsing, and decoded images are capped at 25 MiB each.
 `stop` sequences, embeddings, audio/video input, Anthropic `thinking` blocks
 in responses (reasoning is stripped instead), and multi-model serving — one
 server process serves one model; run several on different ports if needed.
+
+## Image generation
+
+An image-model server supports `POST /v1/images/generations` with the OpenAI
+base64 response shape. See [image generation](IMAGES.md) for installation,
+the supported fields, SDK example, limits, and cancellation behavior.

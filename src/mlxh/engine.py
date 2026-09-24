@@ -16,7 +16,10 @@ import traceback
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .images import ImageGenerationRequest
 
 from .loader import load_runner
 
@@ -62,7 +65,7 @@ class GenerationTerminal:
 
 @dataclass
 class Job:
-    request: GenerationRequest
+    request: GenerationRequest | ImageGenerationRequest
     out: queue.Queue
     request_id: str = field(default_factory=lambda: f"req_{uuid.uuid4().hex[:24]}")
     cancelled: threading.Event = field(default_factory=threading.Event)
@@ -127,7 +130,7 @@ class ReasoningParser:
         return answer_text, "".join(reasoning)
 
 
-class InferenceEngine:
+class EngineLifecycle:
     """Own one runner, one MLX thread, one queue, and all live statistics."""
 
     def __init__(self, model_path: str, model_id: str, settings: dict[str, Any],
@@ -154,6 +157,7 @@ class InferenceEngine:
         self._requests: dict[str, Job] = {}
         self._requests_lock = threading.Lock()
         self._thread: threading.Thread | None = None
+        self._admission_lock = threading.Lock()
 
     @property
     def supports_images(self) -> bool:
@@ -174,22 +178,24 @@ class InferenceEngine:
             raise EngineError(503, f"model failed to load: {self.failed}")
         raise EngineError(503, "model is still loading")
 
-    def submit(self, request: GenerationRequest) -> Job:
+    def submit(self, request: GenerationRequest | ImageGenerationRequest) -> Job:
         self.wait_ready()
-        if self.jobs.qsize() >= self.settings["max_queued"]:
-            raise EngineError(503, "Server busy: too many queued generations")
-        job = Job(request=request, out=queue.Queue())
-        with self._requests_lock:
-            self._requests[job.request_id] = job
-        with self._stats_lock:
-            self._stats["requests"] += 1
-        self.jobs.put(job)
+        with self._admission_lock:
+            if self.jobs.qsize() >= self.settings["max_queued"]:
+                raise EngineError(503, "Server busy: too many queued generations")
+            job = Job(request=request, out=queue.Queue())
+            with self._requests_lock:
+                self._requests[job.request_id] = job
+            with self._stats_lock:
+                self._stats["requests"] += 1
+            self.jobs.put(job)
         return job
 
-    def cancel(self, request_id: str, *, private_only=True) -> bool:
+    def cancel(self, request_id: str, *, private_only=True, expected_source=None) -> bool:
         with self._requests_lock:
             job = self._requests.get(request_id)
-        if job is None or (private_only and job.request.source != "chat"):
+        allowed_source = expected_source or ("chat" if private_only else None)
+        if job is None or (allowed_source and job.request.source != allowed_source):
             return False
         job.cancelled.set()
         return True
@@ -202,24 +208,36 @@ class InferenceEngine:
         with self._stats_lock:
             self._stats[key] = value
 
+    def _configure_memory(self, mx):
+        from .cli import total_ram_bytes
+        limit = self.settings["memory_limit_gb"]
+        if limit > 0:
+            mx.set_memory_limit(int(limit * 1e9))
+            print(f"[mlx] memory limit {limit} GB", flush=True)
+        elif limit == 0:
+            ram = total_ram_bytes()
+            if ram:
+                mx.set_memory_limit(int(ram * 0.8))
+                print(f"[mlx] memory limit {ram * 0.8 / 1e9:.0f} GB "
+                      "(auto 80% of RAM; memory_limit_gb overrides, -1 disables)", flush=True)
+        if self.settings["cache_limit_gb"] > 0:
+            mx.set_cache_limit(int(self.settings["cache_limit_gb"] * 1e9))
+
+    def _snapshot_peak(self, mx):
+        try:
+            self._set("last_peak_memory_bytes", int(mx.get_peak_memory()))
+            mx.reset_peak_memory()
+        except Exception:
+            traceback.print_exc()
+
+
+class InferenceEngine(EngineLifecycle):
+    model_kind = "language"
+
     def _worker(self):
         try:
             import mlx.core as mx
-            from .cli import total_ram_bytes
-
-            if self.settings["memory_limit_gb"] > 0:
-                mx.set_memory_limit(int(self.settings["memory_limit_gb"] * 1e9))
-                print(f"[mlx] memory limit {self.settings['memory_limit_gb']} GB", flush=True)
-            elif self.settings["memory_limit_gb"] == 0:
-                ram = total_ram_bytes()
-                if ram:
-                    limit = int(ram * 0.8)
-                    mx.set_memory_limit(limit)
-                    print(f"[mlx] memory limit {limit / 1e9:.0f} GB "
-                          "(auto 80% of RAM; memory_limit_gb overrides, -1 disables)",
-                          flush=True)
-            if self.settings["cache_limit_gb"] > 0:
-                mx.set_cache_limit(int(self.settings["cache_limit_gb"] * 1e9))
+            self._configure_memory(mx)
             print(f"Loading {self.model_id} from {self.model_path}...", flush=True)
             started = time.perf_counter()
             self.runner = load_runner(self.model_path)
@@ -472,8 +490,10 @@ class InferenceEngine:
             mlx_version = None
         return {
             "model": self.model_id,
+            "model_kind": self.model_kind,
             "settings": self.settings,
-            "capabilities": {"images": self.supports_images, "chat_protocol": 1},
+            "capabilities": {"images": self.supports_images, "chat_protocol": 1,
+                             "image_generation": False, "image_edits": False},
             "mlx": mlx_stats,
             "runtime": {
                 "engine_version": 1,

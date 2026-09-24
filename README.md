@@ -9,12 +9,14 @@ so uninstalling is complete and clean.
 macOS 26). It works well there; expect rough edges elsewhere, and expect
 interfaces to change. No support commitments.
 
-Supports two model families behind one interface:
+Supports these model families:
 
 - **Prism Hadamard packs** (e.g. `prism-ml/Ternary-Bonsai-2-27B-mlx-2bit`) —
   loaded through the runtime code bundled inside the pack.
 - **Stock MLX models** (anything `mlx_vlm` / `mlx_lm` loads, e.g. most of
   `mlx-community/*`).
+- **Local image generation** with MFLUX: FLUX.1 Schnell, FLUX.2 Klein 4B, and
+  Qwen Image 2512. See [image generation](docs/IMAGES.md).
 
 ## Install
 
@@ -58,6 +60,8 @@ mlxh chat bonsai2 -- -p "one question"   # one-shot (args after the name pass th
 mlxh chat bonsai2 -- --thinking          # show model reasoning, dimmed (--no-thinking skips it)
 
 mlxh serve bonsai2                       # OpenAI + Anthropic API at :1060
+mlxh image klein                         # interactive image generation
+mlxh image klein "A fox in a bookshop" --output ~/Pictures/fox.png
 mlxh launch claude --model gemma4-12b --no-mcp   # run Claude Code on a local model
 mlxh config port 1234                    # persistent defaults
 
@@ -87,6 +91,8 @@ Set persistently with `mlxh config <key> <value>`, or per run with
 | `max_prompt_tokens` | 8192 | reject larger prompts with a 400 (0 = off) |
 | `prompt_cache` | true | reuse KV blocks across requests — same-prefix follow-ups skip reprocessing (agents: 4-20x faster TTFT) |
 | `thinking` | auto | model reasoning: `auto` (model default), `on`, `off` |
+| `max_image_pixels` | 4194304 | image width × height ceiling (also subject to model limits) |
+| `image_steps` | 0 | image denoising steps; 0 uses the selected model's MFLUX default, maximum 100 |
 
 `mlxh status` shows live memory, queue, traffic, and process statistics for
 the local server; use `mlxh status --json` for scripts.
