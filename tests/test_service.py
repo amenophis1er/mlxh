@@ -51,12 +51,18 @@ def service_env(tmp_path, monkeypatch):
     return home, plist
 
 
-def test_service_model_must_be_configured(tmp_path, monkeypatch):
+def test_service_installs_model_manager_without_model_config(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "HOME", tmp_path)
     monkeypatch.setattr(cli, "CONFIG", tmp_path / "missing.json")
+    monkeypatch.setattr(cli.shutil, "which", lambda _name: "/opt/bin/mlxh")
+    monkeypatch.setattr(cli, "_service_loaded", lambda: False)
+    monkeypatch.setattr(cli, "_port_in_use", lambda _port: False)
+    monkeypatch.setattr(cli, "_launchctl", lambda *_args: None)
+    monkeypatch.setattr(cli, "_service_plist_path", lambda: tmp_path / "service.plist")
     monkeypatch.delenv("MLXH_MODELS_DIR", raising=False)
-    with pytest.raises(SystemExit):
-        cli._service_install()
+    cli._service_install()
+    data = plistlib.loads((tmp_path / "service.plist").read_bytes())
+    assert data["ProgramArguments"] == ["/opt/bin/mlxh", "serve", "--host", "127.0.0.1"]
 
 
 def test_service_rejects_ephemeral_models_dir(monkeypatch):
@@ -120,7 +126,7 @@ def test_service_initial_install(service_env, monkeypatch):
     cli._service_install()
     data = plistlib.loads(plist.read_bytes())
     assert data["EnvironmentVariables"]["MLXH_HOME"] == str(home.resolve())
-    assert data["ProgramArguments"][2] == "bonsai2"
+    assert data["ProgramArguments"] == ["/opt/bin/mlxh", "serve", "--host", "127.0.0.1"]
     assert plist.stat().st_mode & 0o777 == 0o644
     assert calls == [("bootstrap", f"gui/{os.getuid()}", str(plist))]
 
@@ -189,11 +195,19 @@ def test_service_bootout_failure_preserves_plist(service_env, monkeypatch):
     assert plist.read_text() == "keep me"
 
 
-def test_service_restart_uses_kickstart(monkeypatch):
+def test_service_restart_gracefully_reloads_manager(monkeypatch, tmp_path):
     calls = []
+    plist = tmp_path / "service.plist"
+    plist.touch()
+    monkeypatch.setattr(cli, "_service_plist_path", lambda: plist)
+    monkeypatch.setattr(cli, "_service_loaded", lambda: True)
+    monkeypatch.setattr(cli, "_wait_for_port_release", lambda _port: True)
     monkeypatch.setattr(cli, "_launchctl", lambda *args: calls.append(args))
     cli._service_restart()
-    assert calls == [("kickstart", "-k", cli._service_target())]
+    assert calls == [
+        ("bootout", cli._service_target()),
+        ("bootstrap", f"gui/{os.getuid()}", str(plist)),
+    ]
 
 
 def test_full_uninstall_stops_service_before_removing_home(

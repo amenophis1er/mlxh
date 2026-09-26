@@ -49,8 +49,10 @@ uv run --python 3.11 --with openai --with 'transformers>=5.5' \
 
 You can substitute `openjev-MLX-4bit` or `openjev-MLX` for `bonsai2`. The
 model-card request works unchanged against `localhost:3000/v1/systemone`.
-The helper's hardcoded `model: "qwen"` value is harmless because mlxh serves
-the one model selected at startup and ignores the request's `model` field.
+The helper's hardcoded `model: "qwen"` value is harmless in the fixed-model
+mode shown above: mlxh serves `bonsai2` and ignores the request's `model`
+field. If using manager mode (`mlxh serve` without a model), change that field
+to the installed model name (`bonsai2`) so the manager routes correctly.
 
 Keep `READOUT_TARGETED=1`: it requests every letter by token ID, avoiding a
 missing letter outside top-k. `SHIM_PAD=16` aligns repeated VLM prompts with

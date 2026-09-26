@@ -59,7 +59,8 @@ mlxh chat bonsai2 -- --tools             # with your tools from ~/.mlxh/tools.py
 mlxh chat bonsai2 -- -p "one question"   # one-shot (args after the name pass through)
 mlxh chat bonsai2 -- --thinking          # show model reasoning, dimmed (--no-thinking skips it)
 
-mlxh serve bonsai2                       # OpenAI + Anthropic API at :1060
+mlxh serve                               # model manager API at :1060; workers load on demand
+mlxh serve bonsai2                       # pin one model directly (compatibility mode)
 mlxh image klein                         # interactive image generation
 mlxh image klein "A fox in a bookshop" --output ~/Pictures/fox.png
 mlxh launch claude --model gemma4-12b --no-mcp   # run Claude Code on a local model
@@ -79,7 +80,7 @@ models show up like pulled ones but `rm` never touches the original files.
 ## Server controls
 
 Set persistently with `mlxh config <key> <value>`, or per run with
-`mlxh serve <name> --<key> <value>`:
+`mlxh serve [<name>] --<key> <value>`:
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -93,6 +94,7 @@ Set persistently with `mlxh config <key> <value>`, or per run with
 | `thinking` | auto | model reasoning: `auto` (model default), `on`, `off` |
 | `max_image_pixels` | 4194304 | image width × height ceiling (also subject to model limits) |
 | `image_steps` | 0 | image denoising steps; 0 uses the selected model's MFLUX default, maximum 100 |
+| `worker_idle_timeout_s` | 300 | manager only: unload an idle worker after this many seconds; 0 unloads immediately |
 
 `mlxh status` shows live memory, queue, traffic, and process statistics for
 the local server; use `mlxh status --json` for scripts.
@@ -104,12 +106,19 @@ model copy in memory and makes chat activity visible in `mlxh status`. If the
 configured port is serving another model, chat refuses instead of silently
 talking to the wrong one.
 
-To keep one model available across logins, opt in with
-`mlxh config service_model bonsai2 && mlxh service install`. The per-user
+`mlxh serve` is model-free: `GET /v1/models` lists installed models, and each
+API request's `model` selects an isolated worker. Workers load on first use,
+remain resident for `worker_idle_timeout_s` after their last request, and can
+serve concurrently with workers for other models. `mlxh serve NAME` remains
+available as a directly pinned single-model server. The API manager defaults
+to localhost; expose it only behind your own authentication boundary.
+
+To keep the API manager available across logins, run `mlxh service install`.
+The per-user
 LaunchAgent always binds to localhost and can be restarted with `mlxh service
 restart`; remove it with `mlxh service uninstall` or `mlxh uninstall`.
-LaunchAgents start at login rather than boot, hold the model in RAM while
-running, and append unrotated output to `~/.mlxh/service.log`.
+LaunchAgents start at login rather than before login, and append unrotated
+manager output to `~/.mlxh/service.log`; worker logs are in `~/.mlxh/workers/`.
 
 The last two exist because long contexts are a real hazard on unified memory:
 KV cache grows with prompt length, and an unbounded 30k-token request can
@@ -117,10 +126,11 @@ exhaust RAM and freeze the whole machine. The server fails a request rather
 than take the machine down; raise the limits deliberately when you have the
 headroom (coding agents need `max_prompt_tokens` around 40960).
 
-Generation is intentionally serial (one at a time): Apple Silicon has one GPU
-and the MLX stack has no continuous batching, so requests queue. For parallel
-throughput, run a second `mlxh serve` instance on another port, or use a CUDA
-box with vLLM / llama.cpp `--parallel`.
+Each model worker retains its existing serial queue. Different model workers
+are independent processes and may infer concurrently; they share Apple Silicon
+unified memory. mlxh does not impose a model-count cap, so choose resident and
+inference concurrency for your machine and monitor `mlxh status`/Activity
+Monitor for memory pressure.
 
 The API supports `/v1/chat/completions` (streaming + non-streaming),
 `/v1/models`, tool calling (OpenAI `tools` in, `tool_calls` out), and vision

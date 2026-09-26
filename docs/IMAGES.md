@@ -1,17 +1,17 @@
 # Local image generation
 
 mlxh serves supported MFLUX image models through `POST /v1/images/generations`
-and, for edit-capable models, `POST /v1/images/edits`. It runs one model per
-server process; serve your language model on a different port if you need both
-at once. FLUX.2 Klein 4B supports reference-image editing; Schnell and Qwen
-Image currently support text-to-image only.
+and, for edit-capable models, `POST /v1/images/edits`. In manager mode image and
+language workers can coexist behind the same API listener; each request's
+`model` selects a worker. FLUX.2 Klein 4B supports reference-image editing;
+Schnell and Qwen Image currently support text-to-image only.
 
 ## Install and serve
 
 ```bash
 mlxh images install
 mlxh pull madroid/flux.1-schnell-mflux-4bit --kind image --name schnell
-mlxh serve schnell --cache-limit-gb 1
+mlxh serve --cache-limit-gb 1
 ```
 
 Also supported by the pinned MFLUX 0.20.0 adapter:

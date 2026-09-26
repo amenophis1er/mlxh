@@ -362,7 +362,7 @@ def run(argv=None):
     thinking = True if args.thinking else (False if args.no_thinking else None)
 
     try:
-        transport = ChatTransport(args.base_url)
+        transport = ChatTransport(args.base_url, model=args.model)
         info = transport.info()
     except TransportError as exc:
         sys.exit(exc.message)

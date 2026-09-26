@@ -31,6 +31,42 @@ def test_defaults_complete():
     assert set(cli.KEY_TYPES) == set(cli.DEFAULTS)
 
 
+def test_negative_worker_idle_timeout_is_rejected_from_config(tmp_path, monkeypatch, capsys):
+    config = tmp_path / "config.json"
+    config.write_text('{"worker_idle_timeout_s": -1}')
+    monkeypatch.setattr(cli, "CONFIG", config)
+    with pytest.raises(SystemExit):
+        cli.load_config()
+    assert "worker_idle_timeout_s must be a non-negative number" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["-1", "nan", "inf"])
+def test_config_rejects_invalid_worker_idle_timeout_before_saving(tmp_path, monkeypatch, value):
+    config = tmp_path / "config.json"
+    monkeypatch.setattr(cli, "CONFIG", config)
+    monkeypatch.setattr(cli, "HOME", tmp_path)
+    with pytest.raises(SystemExit):
+        cli.cmd_config(NS(key="worker_idle_timeout_s", value=value))
+    assert not config.exists()
+
+
+def test_config_can_repair_invalid_stored_worker_idle_timeout(tmp_path, monkeypatch):
+    config = tmp_path / "config.json"
+    config.write_text('{"worker_idle_timeout_s": -1}')
+    monkeypatch.setattr(cli, "CONFIG", config)
+    monkeypatch.setattr(cli, "HOME", tmp_path)
+    cli.cmd_config(NS(key="worker_idle_timeout_s", value="300"))
+    assert cli.load_config()["worker_idle_timeout_s"] == 300
+
+
+def test_claude_launch_pins_every_model_alias_to_launched_model():
+    env, argv = cli.AGENTS["claude"](8080, "qwen")
+    assert argv == ["--model", "qwen"]
+    for key in ("ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_SMALL_FAST_MODEL",
+                "CLAUDE_CODE_SUBAGENT_MODEL"):
+        assert env[key] == "qwen"
+
+
 def test_bool_converter():
     assert cli._bool("on") and cli._bool("TRUE") and cli._bool("1")
     assert not cli._bool("off") and not cli._bool("False")
@@ -382,3 +418,17 @@ def test_chat_refuses_different_model_without_stopping_server(monkeypatch):
             cfg, "wanted", "/models/wanted", 1060,
             require_same_model=True, require_chat_protocol=True,
         )
+
+
+def test_chat_reuses_model_manager_without_pinning(monkeypatch):
+    cfg = cli.load_config()
+    monkeypatch.setattr(cli, "_fetch_info", lambda _port: {
+        "model": None, "manager": True, "model_kind": "manager",
+    })
+    monkeypatch.setattr(cli.ui, "note", lambda *_args: None)
+    info, started = cli._ensure_local_server(
+        cfg, "wanted", "/models/wanted", 1060,
+        require_same_model=True, require_chat_protocol=True,
+    )
+    assert info["manager"] is True
+    assert started is None

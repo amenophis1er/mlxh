@@ -6,6 +6,7 @@ import base64
 import json
 import mimetypes
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -24,14 +25,18 @@ def image_data_url(path):
 
 
 class ChatTransport:
-    def __init__(self, base_url, timeout=900):
+    def __init__(self, base_url, timeout=900, model=None):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.model = model
         self.active_request_id = None
 
     def info(self):
         try:
-            with urllib.request.urlopen(f"{self.base_url}/mlxh/info", timeout=2) as response:
+            url = f"{self.base_url}/mlxh/info"
+            if self.model:
+                url += "?" + urllib.parse.urlencode({"model": self.model})
+            with urllib.request.urlopen(url, timeout=2) as response:
                 return json.loads(response.read())
         except Exception as exc:
             raise TransportError(None, f"could not reach mlxh server: {exc}") from None
@@ -46,6 +51,8 @@ class ChatTransport:
         return TransportError(exc.code, message or str(exc))
 
     def generate(self, body):
+        if self.model:
+            body = {**body, "model": body.get("model") or self.model}
         data = json.dumps(body, separators=(",", ":")).encode()
         request = urllib.request.Request(
             f"{self.base_url}/mlxh/generate", data=data,

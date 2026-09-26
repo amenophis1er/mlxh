@@ -8,6 +8,7 @@ Commands:
   mlxh mv <name> <new-name>           rename a model
   mlxh rm <name>                      remove a model (links: symlink only)
   mlxh serve <name> [--port N ...]    OpenAI + Anthropic compatible API server
+  mlxh serve [--port N ...]          model manager; workers load on demand
   mlxh images install                install optional local image generation
   mlxh image [model] [prompt...]     generate images interactively or once
   mlxh status [--json]                show live stats of the local server
@@ -34,9 +35,10 @@ Config keys (mlxh config <key> <value>):
   prompt_cache        reuse KV blocks across requests (true)
   thinking            model reasoning: auto / on / off (auto)
   chat_tools          load ~/.mlxh/tools.py in chat by default (false)
-  service_model       model loaded by `mlxh service install` (unset)
+  service_model       deprecated; service now starts the model manager
   max_image_pixels    image width * height ceiling (4194304)
   image_steps         denoising steps, 0 = model default (0)
+  worker_idle_timeout_s unload idle manager workers after this many seconds (300)
 
 State lives under $MLXH_HOME (default ~/.mlxh): venv, app code, config,
 models, HF cache. Uninstall removes exactly that plus the launcher.
@@ -44,6 +46,7 @@ models, HF cache. Uninstall removes exactly that plus the launcher.
 
 import argparse
 import json
+import math
 import os
 import plistlib
 import signal
@@ -78,6 +81,7 @@ DEFAULTS = {
     "service_model": "",
     "max_image_pixels": 4194304,
     "image_steps": 0,
+    "worker_idle_timeout_s": 300,
 }
 def _bool(v):
     if v.lower() in ("1", "true", "on", "yes"):
@@ -87,23 +91,39 @@ def _bool(v):
     raise ValueError(v)
 
 
+def _idle_timeout(v):
+    value = float(v)
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(v)
+    return value
+
+
 KEY_TYPES = {
     "port": int, "host": str, "models_dir": str, "max_queued": int,
     "max_tokens_cap": int, "memory_limit_gb": float, "cache_limit_gb": float,
     "gen_timeout_s": int, "max_prompt_tokens": int, "prompt_cache": _bool,
     "thinking": str, "chat_tools": _bool, "service_model": str,
     "max_image_pixels": int, "image_steps": int,
+    "worker_idle_timeout_s": _idle_timeout,
 }
 
 SERVICE_LABEL = "com.mlxh.serve"
 
 
-def load_config():
+def load_config(validate=True):
     cfg = dict(DEFAULTS)
     if CONFIG.exists():
         stored = json.loads(CONFIG.read_text())
         stored.pop("models", None)  # registry from pre-0.2 layouts; now unused
         cfg.update(stored)
+    if not validate:
+        return cfg
+    try:
+        cfg["worker_idle_timeout_s"] = _idle_timeout(cfg["worker_idle_timeout_s"])
+    except (TypeError, ValueError):
+        ui.fail("invalid worker idle timeout",
+                "worker_idle_timeout_s must be a non-negative number; "
+                "fix it with `mlxh config worker_idle_timeout_s 300`")
     return cfg
 
 
@@ -515,13 +535,19 @@ def serve_argv(cfg, name, path, overrides=None):
 
 def cmd_serve(args):
     cfg = load_config()
-    name = args.name or pick_model(cfg, "serve")
-    path = resolve(cfg, name)
-    overrides = {k: getattr(args, k) for k in
+    overrides = {k: getattr(args, k, None) for k in
                  ("port", "host", "max_queued", "max_tokens_cap",
                   "memory_limit_gb", "cache_limit_gb", "gen_timeout_s",
                   "max_prompt_tokens", "prompt_cache", "thinking",
-                  "max_image_pixels", "image_steps")}
+                  "max_image_pixels", "image_steps", "worker_idle_timeout_s")}
+    if not args.name:
+        argv = [sys.executable, "-m", "mlxh.manager_app"]
+        for key, value in overrides.items():
+            if value is not None:
+                argv.extend(["--" + key.replace("_", "-"), str(value)])
+        os.execv(argv[0], argv)
+    name = args.name
+    path = resolve(cfg, name)
     argv = serve_argv(cfg, name, path, overrides)
     os.execv(argv[0], argv)
 
@@ -576,6 +602,32 @@ def cmd_status(args):
         print(json.dumps({**info, "port": port}, indent=2))
         return
 
+    if info.get("manager"):
+        workers = info.get("workers") or []
+        print(ui.dim(f"API manager on 127.0.0.1:{port}  |  "
+                     f"{len(workers)} resident model(s)"))
+        if not workers:
+            print("No model workers loaded. The first API request starts one.")
+        else:
+            headers = ["MODEL", "KIND", "PID", "STATE", "QUEUE", "ACTIVE",
+                       "REQ", "ACTIVE GB", "IDLE UNLOAD IN"]
+            rows = [[w.get("model", "—"), w.get("model_kind") or "—",
+                     str(w.get("pid") or "—"), str(w.get("state", "—")).upper(),
+                     str(w.get("queue_depth") if w.get("queue_depth") is not None else "—"),
+                     str(w.get("active_requests", 0)),
+                     str(w.get("requests") if w.get("requests") is not None else "—"),
+                     (_format_gb(w["active_memory_bytes"])
+                      if w.get("active_memory_bytes") is not None else "—"),
+                     (f"{w['idle_expires_in_s']}s"
+                      if w.get("idle_expires_in_s") is not None else "—")]
+                    for w in workers]
+            widths = [max(len(h), *(len(row[i]) for row in rows))
+                      for i, h in enumerate(headers)]
+            print("  ".join(f"{h:{w}}" for h, w in zip(headers, widths)))
+            for row in rows:
+                print("  ".join(f"{v:{w}}" for v, w in zip(row, widths)))
+        return
+
     runtime = info.get("runtime") or {}
     mlx = info.get("mlx") or {}
     ready_value = runtime.get("ready")
@@ -615,12 +667,17 @@ def cmd_status(args):
         ui.note("warning: this is an older mlxh server; restart it for live diagnostics")
 
 
-def service_plist(mlxh_bin: str, model: str, log_path: str,
+def service_plist(mlxh_bin: str, model: str | None, log_path: str,
                   mlxh_home: str) -> str:
-    """Return a launchd plist for the persistent localhost server."""
+    """Return a launchd plist for the persistent localhost API manager."""
+    arguments = [mlxh_bin, "serve"]
+    if model:
+        # Kept for callers/tests constructing a legacy fixed-model service.
+        arguments.extend([model])
+    arguments.extend(["--host", "127.0.0.1"])
     data = {
         "Label": SERVICE_LABEL,
-        "ProgramArguments": [mlxh_bin, "serve", model, "--host", "127.0.0.1"],
+        "ProgramArguments": arguments,
         "KeepAlive": True,
         "ThrottleInterval": 60,
         "EnvironmentVariables": {
@@ -709,11 +766,7 @@ def _service_install(dry_run=False):
         ui.fail("MLXH_MODELS_DIR cannot be used by the login service",
                 hint="persist it with `mlxh config models_dir PATH`, then retry")
     cfg = load_config()
-    model = cfg["service_model"]
-    if not model:
-        ui.fail("service_model is not configured",
-                hint="run `mlxh config service_model MODEL` first")
-    resolve(cfg, model)
+    model = None
     launcher = os.environ.get("MLXH_LAUNCHER") or shutil.which("mlxh")
     if not launcher:
         ui.fail("could not find the mlxh launcher on PATH")
@@ -744,7 +797,7 @@ def _service_install(dry_run=False):
 
     _write_service_plist(path, contents)
     _launchctl("bootstrap", f"gui/{os.getuid()}", str(path))
-    ui.ok(f"installed {SERVICE_LABEL} for model '{model}'")
+    ui.ok(f"installed {SERVICE_LABEL} (model manager; workers load on demand)")
     ui.note(f"logs append to {Path(mlxh_home) / 'service.log'}")
 
 
@@ -763,11 +816,22 @@ def _service_uninstall(dry_run=False):
 
 
 def _service_restart(dry_run=False):
-    command = ("kickstart", "-k", _service_target())
+    path = _service_plist_path()
+    bootout = ("bootout", _service_target())
+    bootstrap = ("bootstrap", f"gui/{os.getuid()}", str(path))
     if dry_run:
-        print(f"launchctl {' '.join(command)}")
+        print(f"launchctl {' '.join(bootout)}")
+        print(f"launchctl {' '.join(bootstrap)}")
         return
-    _launchctl(*command)
+    if not path.is_file():
+        ui.fail("the mlxh service is not installed",
+                hint="run `mlxh service install` first")
+    if _service_loaded():
+        _launchctl(*bootout)
+        if not _wait_for_port_release(load_config()["port"]):
+            ui.fail("the service did not shut down cleanly",
+                    hint="inspect ~/.mlxh/service.log before retrying")
+    _launchctl(*bootstrap)
     ui.ok(f"restarted {SERVICE_LABEL}")
 
 
@@ -790,7 +854,14 @@ AGENTS = {
     # agent -> (env for a server at PORT, extra argv given MODEL)
     "claude": lambda port, model: (
         {"ANTHROPIC_BASE_URL": f"http://127.0.0.1:{port}",
-         "ANTHROPIC_AUTH_TOKEN": "mlxh", "ANTHROPIC_API_KEY": ""},
+         "ANTHROPIC_AUTH_TOKEN": "mlxh", "ANTHROPIC_API_KEY": "",
+         # The manager routes by model name; keep Claude Code's background
+         # and Haiku-default subagent calls on the launched model.
+         "ANTHROPIC_DEFAULT_HAIKU_MODEL": model,
+         "ANTHROPIC_DEFAULT_SONNET_MODEL": model,
+         "ANTHROPIC_DEFAULT_OPUS_MODEL": model,
+         "ANTHROPIC_SMALL_FAST_MODEL": model,
+         "CLAUDE_CODE_SUBAGENT_MODEL": model},
         ["--model", model]),
     # ChatGPT-account Codex ignores OPENAI_BASE_URL; a model_provider
     # override is the documented way to point it at a custom server.
@@ -873,6 +944,8 @@ def _ensure_local_server(cfg, name, path, port, *, require_same_model=False,
         while True:
             try:
                 info = _fetch_info(port)
+                if info.get("manager"):
+                    break
                 runtime = info.get("runtime") or {}
                 if runtime.get("ready"):
                     break
@@ -883,7 +956,9 @@ def _ensure_local_server(cfg, name, path, port, *, require_same_model=False,
                 ui.fail("server failed to start", f"see {log_path}")
             time.sleep(0.25)
     serving = info.get("model")
-    if serving != name:
+    if info.get("manager"):
+        ui.note(f"reusing model manager on port {port}; requests will use '{name}'")
+    elif serving != name:
         if require_same_model:
             if started:
                 _stop_owned_server(started)
@@ -895,7 +970,7 @@ def _ensure_local_server(cfg, name, path, port, *, require_same_model=False,
                 f"(serving '{serving}', not '{name}')")
     elif started is None:
         ui.note(f"reusing running server on port {port}")
-    if require_chat_protocol and (
+    if require_chat_protocol and not info.get("manager") and (
         info.get("capabilities", {}).get("chat_protocol") != 1
         or info.get("runtime", {}).get("engine_version") != 1
     ):
@@ -1247,11 +1322,12 @@ def cmd_image(args):
     info, started = _ensure_local_server(
         cfg, name, path, port, require_same_model=True,
     )
-    if info.get("model_kind") != "image":
+    if info.get("model_kind") not in {"image", "manager"}:
         if started:
             _stop_owned_server(started)
         ui.fail("the running server is not an image generation server")
-    if input_images and not info.get("capabilities", {}).get("image_edits", False):
+    if (input_images and not info.get("manager")
+            and not info.get("capabilities", {}).get("image_edits", False)):
         if started:
             _stop_owned_server(started)
         ui.fail(f"'{name}' does not support image editing")
@@ -1389,7 +1465,8 @@ def cmd_image(args):
 
 
 def cmd_config(args):
-    cfg = load_config()
+    # Unvalidated, so `mlxh config` can repair a bad stored value.
+    cfg = load_config(validate=False)
     if not args.key:
         print(json.dumps(cfg, indent=2))
         return
@@ -1402,7 +1479,8 @@ def cmd_config(args):
     try:
         cfg[args.key] = KEY_TYPES[args.key](args.value)
     except ValueError:
-        kind = "bool" if KEY_TYPES[args.key] is _bool else KEY_TYPES[args.key].__name__
+        kind = {_bool: "bool", _idle_timeout: "non-negative number"}.get(
+            KEY_TYPES[args.key], KEY_TYPES[args.key].__name__)
         ui.fail(f"'{args.key}' expects a {kind}")
     save_config(cfg)
     ui.ok(f"{args.key} = {cfg[args.key]}")
@@ -1456,7 +1534,8 @@ def cmd_home(parser):
                      max_tokens_cap=None, memory_limit_gb=None,
                      cache_limit_gb=None, gen_timeout_s=None,
                      max_prompt_tokens=None, prompt_cache=None, thinking=None,
-                     max_image_pixels=None, image_steps=None))
+                     max_image_pixels=None, image_steps=None,
+                     worker_idle_timeout_s=None))
 
 
 def cmd_uninstall(args):
@@ -1544,6 +1623,8 @@ def main():
     p.add_argument("--thinking", choices=["auto", "on", "off"], dest="thinking")
     p.add_argument("--max-image-pixels", type=int)
     p.add_argument("--image-steps", type=int)
+    p.add_argument("--worker-idle-timeout-s", type=float,
+                   help="manager: idle seconds before unload (0 unloads immediately)")
     p.set_defaults(fn=cmd_serve)
 
     p = sub.add_parser("status", help="show live stats of the running server")

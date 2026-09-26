@@ -1,7 +1,9 @@
 # mlxh serve — REST API reference
 
-`mlxh serve <model>` exposes one model on `http://127.0.0.1:1060` (configurable
-via `port`/`host`). Authentication: none — any bearer token / API key is
+`mlxh serve` starts a model manager on `http://127.0.0.1:1060` (configurable
+via `port`/`host`). The request `model` selects an installed model whose worker
+loads on demand. `mlxh serve <model>` remains fixed-model mode. Authentication:
+none — any bearer token / API key is
 accepted. The server binds to localhost by default and must not be exposed
 beyond it as-is.
 
@@ -17,8 +19,10 @@ Plus `GET /mlxh/info` (mlxh-specific).
 
 ## Execution model
 
-One generation runs at a time (single GPU, no continuous batching). Further
-requests queue, up to `max_queued`; beyond that the server answers **503**.
+Each worker runs one generation at a time (no continuous batching). Further
+requests for that model queue, up to `max_queued`; beyond that the worker
+answers **503**. Different workers run independently and may execute
+concurrently.
 A job always runs to completion once started, even if the client disconnects.
 With `prompt_cache` on (default), requests sharing a prefix with the previous
 request skip reprocessing those tokens.
@@ -42,9 +46,10 @@ Models whose chat template pre-opens a reasoning block (e.g. Bonsai) have the
 ### POST /v1/chat/completions
 
 Request fields honored: `messages`, `tools`, `max_tokens` (or
-`max_completion_tokens`), `temperature`, `top_p`, `stream`. The `model` field
-is accepted and ignored — the server serves the model it was started with
-(`GET /v1/models` tells you which).
+`max_completion_tokens`), `temperature`, `top_p`, `stream`. In manager mode,
+`model` must name an installed model (`GET /v1/models` lists available names).
+In fixed-model mode the server serves the model it was started with and
+ignores the request's `model` field.
 
 Message content may be a string or OpenAI content parts. Image parts are
 supported when the model has a vision tower:
@@ -245,8 +250,9 @@ JSON parsing, and decoded images are capped at 25 MiB each.
 
 `n > 1`, streaming logprobs, `response_format`/JSON mode, enforced `tool_choice`,
 `stop` sequences, embeddings, audio/video input, Anthropic `thinking` blocks
-in responses (reasoning is stripped instead), and multi-model serving — one
-server process serves one model; run several on different ports if needed.
+in responses (reasoning is stripped instead). Manager mode routes supported
+chat, Responses, Anthropic, and image endpoints by request model; fixed-model
+mode continues to ignore request model selection.
 
 ## Image generation
 
