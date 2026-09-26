@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## v0.2.0 — 2026-09-25
+
+- **Model manager**: `mlxh serve` now starts a model-free API manager that loads
+  independent model workers on demand, supports concurrent resident models,
+  routes requests by model, and unloads idle workers. Status reports per-model
+  worker state and activity. Fixed-model serving remains available with
+  `mlxh serve NAME`.
+- **Image generation and editing**: install optional image support, pull
+  supported image models, and generate from the `mlxh image` interactive CLI
+  or OpenAI-compatible Images API. The CLI supports seeds, steps, dimensions,
+  output format/directory, local image references, and reference-based edits.
+- **API instrumentation**: chat, image, and service requests use the shared
+  engine/manager lifecycle and expose consistent request, token, timing,
+  queue, and memory diagnostics.
 - **Targeted logprobs**: non-streaming OpenAI chat completions can return
   full-vocabulary token log-probabilities, including the vLLM-compatible
   targeted-ID fields used by the frozen OpenJev helper.
