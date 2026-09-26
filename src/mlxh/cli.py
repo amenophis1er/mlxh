@@ -16,6 +16,7 @@ Commands:
   mlxh launch <agent> [--model NAME]  run a coding agent (claude, codex, pi)
   mlxh chat <name> [chat args...]     terminal chat (tools, images, streaming)
   mlxh config [key [value]]           show or set config
+  mlxh update                         update mlxh (also: upgrade)
   mlxh uninstall                      remove mlxh and everything it manages
 
 Models live in ONE directory and the filesystem is the registry: every
@@ -1561,10 +1562,81 @@ def cmd_uninstall(args):
     print(f"removed {HOME}." + (f" (kept {root})" if outside else "") + " Goodbye.")
 
 
+def _uv_tool_dir(uv):
+    result = subprocess.run([uv, "tool", "dir"], capture_output=True, text=True)
+    if result.returncode:
+        return None
+    value = result.stdout.strip()
+    return Path(value).expanduser().resolve() if value else None
+
+
+def _inside(path, parent):
+    try:
+        path.resolve().relative_to(parent.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def cmd_update(args):
+    from . import __version__
+
+    managed_python = HOME / "venv" / "bin" / "python"
+    if Path(sys.prefix).resolve() == managed_python.parent.parent.resolve():
+        install_kind = "managed"
+    else:
+        uv = shutil.which("uv")
+        tool_dir = _uv_tool_dir(uv) if uv else None
+        if tool_dir and _inside(Path(sys.prefix), tool_dir):
+            install_kind = "uv"
+        else:
+            ui.fail("this installation method cannot be updated automatically",
+                    hint="use the same method you used to install mlxh, or run the official installer")
+
+    if not args.yes:
+        if not sys.stdin.isatty():
+            ui.fail("confirmation is required in a non-interactive terminal", hint="rerun with --yes")
+        if input(f"Update mlxh {__version__} to the latest available version? [y/N] ").strip().lower() not in ("y", "yes"):
+            ui.note("update cancelled")
+            return
+
+    uv = shutil.which("uv")
+    if not uv:
+        ui.fail("uv is required to update mlxh", hint="install uv, then run mlxh update again")
+
+    if install_kind == "managed":
+        command = [uv, "pip", "install", "--python", str(managed_python),
+                   "--reinstall-package", "mlxh",
+                   "git+https://github.com/amenophis1er/mlxh"]
+    else:
+        command = [uv, "tool", "upgrade", "mlxh"]
+    ui.note(f"updating mlxh {__version__}...")
+    result = subprocess.run(command)
+    if result.returncode:
+        raise SystemExit(result.returncode)
+
+    # The image runtime is a separately staged environment containing a copy
+    # of mlxh, so refresh it whenever it already exists.
+    if (HOME / "images" / "current").exists():
+        sync = subprocess.run([sys.executable, "-m", "mlxh.cli", "images", "install"])
+        if sync.returncode:
+            ui.fail("mlxh updated, but the image runtime could not be synchronized",
+                    hint="run mlxh images install to repair it")
+
+    ui.ok("mlxh updated. Restart any running server or service to load the new version.")
+
+
 def main():
     ap = argparse.ArgumentParser(prog="mlxh", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    from . import __version__
+    ap.add_argument("--version", action="version", version=f"mlxh {__version__}")
     sub = ap.add_subparsers(dest="cmd", required=False)
+
+    p = sub.add_parser("update", aliases=["upgrade"],
+                       help="update mlxh while keeping models and configuration")
+    p.add_argument("-y", "--yes", action="store_true", help="skip confirmation")
+    p.set_defaults(fn=cmd_update)
 
     p = sub.add_parser("search", help="search Hugging Face for MLX models")
     p.add_argument("query")

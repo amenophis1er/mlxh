@@ -1,4 +1,6 @@
 import json
+import sys
+from pathlib import Path
 from types import SimpleNamespace as NS
 
 import pytest
@@ -29,6 +31,36 @@ def test_defaults_complete():
     cfg = cli.load_config()
     assert set(cli.DEFAULTS) <= set(cfg)
     assert set(cli.KEY_TYPES) == set(cli.DEFAULTS)
+
+
+def test_update_uses_managed_install_and_preserves_image_runtime(tmp_path, monkeypatch):
+    home = tmp_path / "mlxh"
+    venv = home / "venv"
+    venv.mkdir(parents=True)
+    monkeypatch.setattr(cli.sys, "prefix", str(venv))
+    monkeypatch.setattr(cli, "HOME", home)
+    (home / "images").mkdir(exist_ok=True)
+    (home / "images" / "current").touch()
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/uv")
+    calls = []
+    monkeypatch.setattr(cli.subprocess, "run", lambda command, **kwargs: calls.append(command) or NS(returncode=0))
+
+    cli.cmd_update(NS(yes=True))
+
+    assert calls[0][:5] == ["/usr/bin/uv", "pip", "install", "--python", str(venv / "bin" / "python")]
+    assert calls[0][-1] == "git+https://github.com/amenophis1er/mlxh"
+    assert calls[1] == [sys.executable, "-m", "mlxh.cli", "images", "install"]
+
+
+def test_update_uses_uv_tool_upgrade(monkeypatch):
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/uv")
+    monkeypatch.setattr(cli, "_uv_tool_dir", lambda uv: Path(sys.prefix).parent)
+    calls = []
+    monkeypatch.setattr(cli.subprocess, "run", lambda command, **kwargs: calls.append(command) or NS(returncode=0))
+
+    cli.cmd_update(NS(yes=True))
+
+    assert calls == [["/usr/bin/uv", "tool", "upgrade", "mlxh"]]
 
 
 def test_negative_worker_idle_timeout_is_rejected_from_config(tmp_path, monkeypatch, capsys):

@@ -16,6 +16,9 @@
 - **API instrumentation**: chat, image, and service requests use the shared
   engine/manager lifecycle and expose consistent request, token, timing,
   queue, and memory diagnostics.
+- **Updates**: `mlxh update` / `mlxh upgrade` updates managed and uv-tool
+  installations without touching models or configuration, and resynchronizes
+  an installed image runtime. `mlxh --version` reports the package version.
 - **Targeted logprobs**: non-streaming OpenAI chat completions can return
   full-vocabulary token log-probabilities, including the vLLM-compatible
   targeted-ID fields used by the frozen OpenJev helper.

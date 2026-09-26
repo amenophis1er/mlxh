@@ -41,6 +41,9 @@ git clone https://github.com/amenophis1er/mlxh.git && cd mlxh && ./install.sh
 Either way it installs to `~/.mlxh` with the launcher in `~/.local/bin`;
 override locations with `MLXH_HOME` / `MLXH_BIN`. Re-running the installer
 updates the app code in place (models and config are untouched).
+Update an existing installation at any time with `mlxh update` (or
+`mlxh upgrade`); use `--yes` to skip its confirmation prompt. This supports
+the managed installer and `uv tool` installs, and keeps models/config intact.
 
 ## Use
 
