@@ -137,7 +137,7 @@ def test_service_reinstall_orders_bootout_write_bootstrap(service_env, monkeypat
     plist.write_text("old plist")
     events = []
     monkeypatch.setattr(cli, "_service_loaded", lambda: True)
-    monkeypatch.setattr(cli, "_wait_for_port_release", lambda _port: True)
+    monkeypatch.setattr(cli, "_wait_for_service_stop", lambda _port: True)
     monkeypatch.setattr(cli, "_launchctl",
                         lambda *args: events.append((args[0], args[1:])))
     real_write = cli._write_service_plist
@@ -167,7 +167,7 @@ def test_reinstall_keeps_old_plist_when_port_stays_busy(service_env, monkeypatch
     plist.write_text("old plist")
     monkeypatch.setattr(cli, "_service_loaded", lambda: True)
     monkeypatch.setattr(cli, "_launchctl", lambda *_args: None)
-    monkeypatch.setattr(cli, "_wait_for_port_release", lambda _port: False)
+    monkeypatch.setattr(cli, "_wait_for_service_stop", lambda _port: False)
     with pytest.raises(SystemExit):
         cli._service_install()
     assert plist.read_text() == "old plist"
@@ -195,13 +195,27 @@ def test_service_bootout_failure_preserves_plist(service_env, monkeypatch):
     assert plist.read_text() == "keep me"
 
 
+def test_service_stop_waits_for_launchd_to_drop_the_job(monkeypatch):
+    states = iter([True, True, False])
+    monkeypatch.setattr(cli, "_service_loaded", lambda: next(states))
+    monkeypatch.setattr(cli, "_port_in_use", lambda _port: False)
+    monkeypatch.setattr(cli.time, "sleep", lambda _s: None)
+    assert cli._wait_for_service_stop(1060) is True
+
+
+def test_service_stop_gives_up_when_job_stays_registered(monkeypatch):
+    monkeypatch.setattr(cli, "_service_loaded", lambda: True)
+    monkeypatch.setattr(cli.time, "sleep", lambda _s: None)
+    assert cli._wait_for_service_unload(timeout=0) is False
+
+
 def test_service_restart_gracefully_reloads_manager(monkeypatch, tmp_path):
     calls = []
     plist = tmp_path / "service.plist"
     plist.touch()
     monkeypatch.setattr(cli, "_service_plist_path", lambda: plist)
     monkeypatch.setattr(cli, "_service_loaded", lambda: True)
-    monkeypatch.setattr(cli, "_wait_for_port_release", lambda _port: True)
+    monkeypatch.setattr(cli, "_wait_for_service_stop", lambda _port: True)
     monkeypatch.setattr(cli, "_launchctl", lambda *args: calls.append(args))
     cli._service_restart()
     assert calls == [

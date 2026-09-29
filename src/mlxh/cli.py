@@ -749,6 +749,24 @@ def _wait_for_port_release(port, timeout=3.0):
     return True
 
 
+def _wait_for_service_unload(timeout=10.0):
+    """Wait for launchd to drop the job after bootout.
+
+    bootout returns before the job is gone; bootstrapping while it is still
+    registered fails with "Bootstrap failed: 5: Input/output error".
+    """
+    deadline = time.monotonic() + timeout
+    while _service_loaded():
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.1)
+    return True
+
+
+def _wait_for_service_stop(port):
+    return _wait_for_service_unload() and _wait_for_port_release(port)
+
+
 def _write_service_plist(path, contents):
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
@@ -789,7 +807,7 @@ def _service_install(dry_run=False):
     port = cfg["port"]
     if loaded:
         _launchctl("bootout", _service_target())
-        if not _wait_for_port_release(port):
+        if not _wait_for_service_stop(port):
             ui.fail(f"port {port} is still in use after stopping the service",
                     hint="stop the process using it, then retry")
     elif _port_in_use(port):
@@ -829,7 +847,7 @@ def _service_restart(dry_run=False):
                 hint="run `mlxh service install` first")
     if _service_loaded():
         _launchctl(*bootout)
-        if not _wait_for_port_release(load_config()["port"]):
+        if not _wait_for_service_stop(load_config()["port"]):
             ui.fail("the service did not shut down cleanly",
                     hint="inspect ~/.mlxh/service.log before retrying")
     _launchctl(*bootstrap)
