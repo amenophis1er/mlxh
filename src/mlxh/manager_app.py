@@ -337,9 +337,27 @@ class _PrivateRequestTracker:
                     ACTIVE_REQUESTS.pop(self.request_id, None)
 
 
+# Every route a worker serves. Anything else is refused before a worker is
+# leased, so a client probing unknown endpoints (e.g. Ollama's /api/show with
+# a model name) cannot load every installed model just to receive a 404.
+WORKER_PATHS = frozenset({
+    "v1/chat/completions",
+    "v1/messages",
+    "v1/messages/count_tokens",
+    "v1/responses",
+    "v1/images/generations",
+    "v1/images/edits",
+    "mlxh/generate",
+})
+
+
+def _worker_serves(path: str) -> bool:
+    return path in WORKER_PATHS or path.startswith("mlxh/requests/")
+
+
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
 async def proxy(request: Request, path: str):
-    if path in {"v1/models", "mlxh/info"}:
+    if not _worker_serves(path):
         raise HTTPException(404, "not found")
     if WORKERS is None:
         raise HTTPException(503, "model manager is starting")

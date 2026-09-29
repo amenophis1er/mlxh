@@ -100,6 +100,21 @@ def test_json_request_model_resolution():
     assert manager._model_from_request(request, json.dumps({"model": "alpha"}).encode()) == "alpha"
 
 
+def test_unknown_paths_never_lease_a_worker(client, monkeypatch):
+    class Workers:
+        def lease(self, model):
+            raise AssertionError(f"worker leased for {model}")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(manager, "WORKERS", Workers())
+    for path in ("/api/show", "/api/generate", "/v1/completions", "/v1/embeddings"):
+        response = client.post(path, json={"model": "alpha"})
+        assert response.status_code == 404, path
+    assert client.get("/v1/chat/completions/extra").status_code == 404
+
+
 def test_request_model_routes_to_its_worker_and_holds_lease(monkeypatch):
     from pathlib import Path
 
