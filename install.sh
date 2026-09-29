@@ -22,7 +22,7 @@ if [ -z "$SRC" ] || [ ! -f "$SRC/pyproject.toml" ]; then
   AUTH=()
   [ -n "${GITHUB_TOKEN:-}" ] && AUTH=(-H "Authorization: token $GITHUB_TOKEN")
   echo "Fetching $REPO ..."
-  curl -fsSL "${AUTH[@]}" "https://api.github.com/repos/$REPO/tarball/main" \
+  curl -fsSL ${AUTH[@]+"${AUTH[@]}"} "https://api.github.com/repos/$REPO/tarball/main" \
     | tar -xz -C "$TMP"
   SRC="$(find "$TMP" -mindepth 1 -maxdepth 1 -type d | head -1)"
   [ -f "$SRC/pyproject.toml" ] || { echo "error: download did not contain pyproject.toml"; exit 1; }
