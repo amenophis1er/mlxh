@@ -30,8 +30,11 @@ request skip reprocessing those tokens.
 Server-side limits (see README "Server controls"):
 
 - `max_tokens` is clamped to `max_tokens_cap` (default 16384).
-- Prompts over `max_prompt_tokens` (default 8192) are rejected with **400**
-  and a message naming the size and the config command to raise it.
+- Prompts over `max_prompt_tokens` (default 8192) **or** the model's context
+  window (when known; see the `context_window` setting) are rejected with
+  **400** and a message naming the binding limit and the config command to
+  adjust it. The message is an estimate for image-bearing prompts (image
+  tokens are not counted until the images are encoded).
 - A generation exceeding `gen_timeout_s` (default 600) is stopped and
   returned as-is.
 - MLX memory is capped (default 80% of RAM); allocations beyond it fail the

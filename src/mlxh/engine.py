@@ -33,6 +33,25 @@ class EngineError(Exception):
         self.detail = detail
 
 
+def over_prompt_limit_message(n_prompt: int, prompt_cap: int, window: int | None):
+    """Which limit rejected the prompt, and the config command to adjust it."""
+    if prompt_cap and prompt_cap <= (window or prompt_cap):
+        # `max_prompt_tokens` is the binding limit (or ties the window)
+        return (
+            f"prompt is ~{n_prompt} tokens, over max_prompt_tokens={prompt_cap}. "
+            "Long contexts grow the KV cache and can exhaust unified memory. "
+            f"Raise deliberately: `mlxh config max_prompt_tokens "
+            f"{min(65536, max(prompt_cap * 2, n_prompt + 4096))}` "
+            "(or serve --max-prompt-tokens N)."
+        )
+    return (
+        f"prompt is ~{n_prompt} tokens, over the model context window={window}. "
+        "Prompts beyond the window exceed the model's trained positions. "
+        "If this model supports more context (e.g. YaRN-scaled), continue with "
+        "`mlxh config context_window N` (or serve --context-window N)."
+    )
+
+
 @dataclass
 class LogprobsOptions:
     top: int = 0
@@ -440,17 +459,12 @@ class InferenceEngine(EngineLifecycle):
             isinstance(prompt, str) and prompt.rstrip().endswith("<think>")
         )
         cap = self.settings["max_prompt_tokens"]
-        if cap:
+        window = self.context_window
+        limit = min([v for v in (cap, window) if v and v > 0], default=0)
+        if limit:
             n_prompt = len(prompt) if isinstance(prompt, (list, tuple)) else len(prompt) // 4
-            if n_prompt > cap:
-                raise EngineError(
-                    400,
-                    f"prompt is ~{n_prompt} tokens, over max_prompt_tokens={cap}. "
-                    "Long contexts grow the KV cache and can exhaust unified memory. "
-                    f"Raise deliberately: `mlxh config max_prompt_tokens "
-                    f"{min(65536, max(cap * 2, n_prompt + 4096))}` "
-                    "(or serve --max-prompt-tokens N).",
-                )
+            if n_prompt > limit:
+                raise EngineError(400, over_prompt_limit_message(n_prompt, cap, window))
         print(f"[gen] start: {len(messages)} msgs, {len(images)} images, "
               f"{len(request.tools or [])} tools, max_tokens={max_tokens}", flush=True)
         started = time.perf_counter()

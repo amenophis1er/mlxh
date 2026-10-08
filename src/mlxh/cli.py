@@ -34,7 +34,8 @@ Config keys (mlxh config <key> <value>):
   gen_timeout_s       hard stop for one generation, 0 = off (600)
   max_prompt_tokens   reject prompts bigger than this, 0 = off (8192)
   context_window      model context window: 0 = detect from model config,
-                      -1 = off, N = explicit override (0)
+                      -1 = off, N = explicit override (0); prompts over it
+                      are rejected with 400
   prompt_cache        reuse KV blocks across requests (true)
   thinking            model reasoning: auto / on / off (auto)
   chat_tools          load ~/.mlxh/tools.py in chat by default (false)

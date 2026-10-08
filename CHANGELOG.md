@@ -8,6 +8,10 @@
   column), `GET /v1/models` (`context_length`), and `GET /mlxh/info`. The
   `context_window` setting overrides detection (`0` = detect, `-1` = off,
   `N` = fixed window for models whose config understates the real one).
+  **Enforcement**: prompts larger than the effective window (the smaller of
+  the window and `max_prompt_tokens`) are rejected with **400**; the message
+  names the binding limit and the config command to adjust it. Image-bearing
+  prompt token counts remain estimates until image encoding.
 
 ## v0.2.0 — 2026-09-25
 

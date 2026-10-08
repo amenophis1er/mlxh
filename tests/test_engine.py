@@ -1,15 +1,18 @@
 import queue
+import pytest
 from types import SimpleNamespace as NS
 
 from fastapi.testclient import TestClient
 
 from mlxh import serve_app
 from mlxh.engine import (
+    EngineError,
     GenerationRequest,
     GenerationTerminal,
     InferenceEngine,
     Job,
     ReasoningParser,
+    over_prompt_limit_message,
 )
 
 
@@ -156,3 +159,90 @@ def test_models_endpoint_omits_unknown_context_length(monkeypatch):
     monkeypatch.setattr(serve_app, "engine", NS(context_window=None))
     data = TestClient(serve_app.app).get("/v1/models").json()["data"]
     assert "context_length" not in data[0]
+
+
+class EchoRunner:
+    """Template yields 5 prompt tokens; streams one short completion."""
+    supports_images = False
+    supports_cache = False
+
+    def template(self, messages, num_images=0, tools=None, thinking=None):
+        return [1, 2, 3, 4, 5]
+
+    def stream(self, prompt, **_kwargs):
+        yield NS(text="ok", finish_reason="stop", generation_tokens=2,
+                 generation_tps=1.0, prompt_tokens=5)
+
+
+def _engine(**overrides):
+    settings = {**SETTINGS, **overrides}
+    engine = InferenceEngine("/unused", "test", settings)
+    engine.runner = EchoRunner()
+    return engine
+
+
+def _request():
+    return GenerationRequest(messages=[{"role": "user", "content": "hi"}],
+                             source="chat")
+
+
+def test_prompt_over_context_window_is_rejected(monkeypatch=None):
+    engine = _engine(max_prompt_tokens=0)
+    engine.context_window = 4
+    with pytest.raises(EngineError) as raised:
+        list(engine._run_generation(_request()))
+    assert raised.value.status_code == 400
+    assert "context window=4" in raised.value.detail
+    assert "context_window" in raised.value.detail
+
+
+def test_prompt_at_context_window_is_accepted():
+    engine = _engine(max_prompt_tokens=0)
+    engine.context_window = 5
+    responses = list(engine._run_generation(_request()))
+    assert responses[-1].text == "ok"
+
+
+def test_max_prompt_tokens_precedes_context_window():
+    engine = _engine(max_prompt_tokens=3)
+    engine.context_window = 32768
+    with pytest.raises(EngineError) as raised:
+        list(engine._run_generation(_request()))
+    assert "max_prompt_tokens=3" in raised.value.detail
+    assert "context window" not in raised.value.detail
+
+
+def test_window_tighter_than_max_prompt_tokens_precedes_it():
+    engine = _engine(max_prompt_tokens=8192)
+    engine.context_window = 4
+    with pytest.raises(EngineError) as raised:
+        list(engine._run_generation(_request()))
+    assert "context window=4" in raised.value.detail
+    assert "max_prompt_tokens" not in raised.value.detail
+
+
+def test_no_limits_generates():
+    engine = _engine(max_prompt_tokens=0)
+    assert list(engine._run_generation(_request()))[-1].text == "ok"
+
+
+def test_over_prompt_limit_message_chooses_between_limits():
+    assert "max_prompt_tokens=8192" in over_prompt_limit_message(9000, 8192, None)
+    assert "max_prompt_tokens=8192" in over_prompt_limit_message(9000, 8192, 32768)
+    assert "max_prompt_tokens=32768" in over_prompt_limit_message(40000, 32768, 32768)
+    assert "max_prompt_tokens=16384" in over_prompt_limit_message(40000, 16384, 32768)
+    assert "context window=32768" in over_prompt_limit_message(40000, 65536, 32768)
+    assert "context window=32768" in over_prompt_limit_message(40000, 0, 32768)
+
+
+def test_over_window_prompt_surfaces_as_http_400(monkeypatch):
+    result = queue.Queue()
+    result.put(EngineError(400, "prompt is ~9 tokens, over the model "
+                              "context window=8."))
+    result.put(None)
+    monkeypatch.setattr(serve_app, "submit", lambda _body, source="openai": result)
+    response = TestClient(serve_app.app).post(
+        "/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert response.status_code == 400
+    assert "context window=8" in response.json()["detail"]
