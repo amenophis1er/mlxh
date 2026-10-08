@@ -473,3 +473,25 @@ def test_manager_models_report_detected_context_length(client, monkeypatch, tmp_
             for item in client.get("/v1/models").json()["data"]}
     assert data["alpha"]["context_length"] == 32768
     assert "context_length" not in data["beta"]
+
+
+def test_manager_models_apply_context_window_override(client, monkeypatch, tmp_path):
+    import json as _json
+    from pathlib import Path
+    alpha = tmp_path / "alpha"
+    alpha.mkdir()
+    (alpha / "config.json").write_text(_json.dumps({"max_position_embeddings": 32768}))
+    monkeypatch.setattr(manager, "MODELS", {"alpha": str(alpha), "beta": "/nonexistent"})
+    monkeypatch.setattr("mlxh.cli.discover", lambda _cfg: {
+        "alpha": alpha, "beta": Path("/nonexistent"),
+    })
+    # Positive override: all models advertise the effective window, detected or not
+    monkeypatch.setattr(manager, "CFG", {"context_window": 8192})
+    data = {item["id"]: item for item in client.get("/v1/models").json()["data"]}
+    assert data["alpha"]["context_length"] == 8192
+    assert data["beta"]["context_length"] == 8192
+    # -1 disables window reporting entirely, matching worker enforcement
+    monkeypatch.setattr(manager, "CFG", {"context_window": -1})
+    data = {item["id"]: item for item in client.get("/v1/models").json()["data"]}
+    assert "context_length" not in data["alpha"]
+    assert "context_length" not in data["beta"]

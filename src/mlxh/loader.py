@@ -147,6 +147,24 @@ def context_window_of(model_path):
     return detect_context_window(config)
 
 
+def resolve_context_window(setting, detected):
+    """Effective context window from the `context_window` setting.
+
+    -1 disables window use entirely, 0 (default) uses the value detected
+    from the model config, and a positive value overrides detection. None
+    means no usable window is known. Shared by workers, the fixed-model
+    server, and the manager so every surface reports the same limit.
+    """
+    override = setting or 0
+    if override < 0:
+        return None
+    if override > 0:
+        return override
+    if isinstance(detected, int) and not isinstance(detected, bool) and detected > 0:
+        return detected
+    return None
+
+
 def load_runner(model_dir):
     _quiet_libraries()
     model_dir = Path(model_dir)

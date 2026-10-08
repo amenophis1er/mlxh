@@ -1,6 +1,9 @@
 import json
 
-from mlxh.loader import TextRunner, VLMRunner, context_window_of, detect_context_window
+from mlxh.loader import (
+    TextRunner, VLMRunner, context_window_of, detect_context_window,
+    resolve_context_window,
+)
 
 
 def test_detects_flat_max_position_embeddings():
@@ -71,3 +74,13 @@ def test_runners_hold_context_window():
     assert VLMRunner(None, None, {}, context_window=8192).context_window == 8192
     assert TextRunner(None, None).context_window is None
     assert VLMRunner(None, None, {}).context_window is None
+
+def test_resolve_context_window_setting_semantics():
+    assert resolve_context_window(0, 32768) == 32768      # 0 = detect
+    assert resolve_context_window(None, 32768) == 32768   # missing key = detect
+    assert resolve_context_window(-1, 32768) is None      # -1 = window off
+    assert resolve_context_window(8192, 32768) == 8192    # explicit override wins
+    assert resolve_context_window(8192, None) == 8192     # override despite no detection
+    assert resolve_context_window(0, None) is None
+    assert resolve_context_window(0, 0) is None
+    assert resolve_context_window(0, True) is None

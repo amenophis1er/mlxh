@@ -267,11 +267,12 @@ async def info(request: Request):
 @app.get("/v1/models")
 def models():
     _refresh_models()
-    from .loader import context_window_of
+    from .loader import context_window_of, resolve_context_window
     models = MODELS
+    setting = CFG.get("context_window", 0)
     data = []
     for name in sorted(models):
-        window = context_window_of(models[name])
+        window = resolve_context_window(setting, context_window_of(models[name]))
         item = {"id": name, "object": "model", "owned_by": "mlxh"}
         if window:
             item["context_length"] = window

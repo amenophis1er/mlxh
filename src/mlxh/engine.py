@@ -21,7 +21,7 @@ from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from .images import ImageEditRequest, ImageGenerationRequest
 
-from .loader import load_runner
+from .loader import load_runner, resolve_context_window
 
 MAX_DECODED_IMAGE = 25 * 1024 * 1024
 
@@ -248,21 +248,11 @@ class EngineLifecycle:
             mx.set_cache_limit(int(self.settings["cache_limit_gb"] * 1e9))
 
     def _resolve_context_window(self):
-        """Effective model context window from the `context_window` setting.
-
-        -1 disables window use entirely, 0 (default) uses the value detected
-        from the model config, and a positive value overrides detection. None
-        means no usable window is known.
-        """
-        override = self.settings.get("context_window", 0) or 0
-        if override < 0:
-            return None
-        if override > 0:
-            return override
-        detected = getattr(self.runner, "context_window", None)
-        if isinstance(detected, int) and not isinstance(detected, bool) and detected > 0:
-            return detected
-        return None
+        """Effective model context window from the `context_window` setting."""
+        return resolve_context_window(
+            self.settings.get("context_window", 0),
+            getattr(self.runner, "context_window", None),
+        )
 
     def _snapshot_peak(self, mx):
         try:
