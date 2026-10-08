@@ -33,6 +33,8 @@ Config keys (mlxh config <key> <value>):
   cache_limit_gb      MLX buffer-cache limit, 0 = off
   gen_timeout_s       hard stop for one generation, 0 = off (600)
   max_prompt_tokens   reject prompts bigger than this, 0 = off (8192)
+  context_window      model context window: 0 = detect from model config,
+                      -1 = off, N = explicit override (0)
   prompt_cache        reuse KV blocks across requests (true)
   thinking            model reasoning: auto / on / off (auto)
   chat_tools          load ~/.mlxh/tools.py in chat by default (false)
@@ -76,6 +78,7 @@ DEFAULTS = {
     "cache_limit_gb": 0.0,
     "gen_timeout_s": 600,
     "max_prompt_tokens": 8192,
+    "context_window": 0,
     "prompt_cache": True,
     "thinking": "auto",
     "chat_tools": False,
@@ -102,7 +105,8 @@ def _idle_timeout(v):
 KEY_TYPES = {
     "port": int, "host": str, "models_dir": str, "max_queued": int,
     "max_tokens_cap": int, "memory_limit_gb": float, "cache_limit_gb": float,
-    "gen_timeout_s": int, "max_prompt_tokens": int, "prompt_cache": _bool,
+    "gen_timeout_s": int, "max_prompt_tokens": int, "context_window": int,
+    "prompt_cache": _bool,
     "thinking": str, "chat_tools": _bool, "service_model": str,
     "max_image_pixels": int, "image_steps": int,
     "worker_idle_timeout_s": _idle_timeout,
@@ -449,14 +453,15 @@ def cmd_list(_args):
     for name, path in models.items():
         n = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
         rows.append((name, "linked" if path.is_symlink() else "pulled",
-                     f"{n / 1e9:.1f} GB", source_of(path),
+                     f"{n / 1e9:.1f} GB", _ctx_label(path), source_of(path),
                      str(path.resolve()) if path.is_symlink() else ""))
     nw = max(len("NAME"), max(len(r[0]) for r in rows))
-    sw = max(len("SOURCE"), max(len(r[3]) for r in rows))
+    cw = max(len("CTX"), max(len(r[3]) for r in rows))
+    sw = max(len("SOURCE"), max(len(r[4]) for r in rows))
     cols = shutil.get_terminal_size().columns if sys.stdout.isatty() else 10**9
-    print(ui.dim(f"{'NAME':{nw}}  {'INSTALL':6} {'KIND':12} {'SIZE':>8}  SOURCE"))
+    print(ui.dim(f"{'NAME':{nw}}  {'INSTALL':6} {'KIND':12} {'SIZE':>8} {'CTX':>{cw}}  SOURCE"))
     home = str(Path.home())
-    for name, kind, size, source, target in rows:
+    for name, kind, size, ctx, source, target in rows:
         try:
             meta = image_metadata(models[name])
             quantization = meta.get("quantization_bits") if meta else None
@@ -465,7 +470,7 @@ def cmd_list(_args):
         except ValueError as exc:
             family = "unsupported"
             ui.note(f"{name}: unsupported model metadata: {exc}")
-        line = f"{name:{nw}}  {kind:6} {family:12} {size:>8}  {source:{sw}}"
+        line = f"{name:{nw}}  {kind:6} {family:12} {size:>8} {ctx:>{cw}}  {source:{sw}}"
         if target:
             if target.startswith(home):
                 target = "~" + target[len(home):]
@@ -477,6 +482,15 @@ def cmd_list(_args):
                 print(ui.dim(f"{'':{nw}}  -> {target}"))
                 continue
         print(line.rstrip())
+
+
+def _ctx_label(path):
+    """Humanized detected context window for the `mlxh list` CTX column."""
+    from .loader import context_window_of
+    window = context_window_of(path)
+    if not window:
+        return ""
+    return f"{window // 1024}k" if window >= 1024 else str(window)
 
 
 def cmd_mv(args):
@@ -527,6 +541,7 @@ def serve_argv(cfg, name, path, overrides=None):
         "--cache-limit-gb", str(pick("cache_limit_gb")),
         "--gen-timeout-s", str(pick("gen_timeout_s")),
         "--max-prompt-tokens", str(pick("max_prompt_tokens")),
+        "--context-window", str(pick("context_window")),
         "--prompt-cache", str(pick("prompt_cache")),
         "--thinking", str(pick("thinking")),
         "--max-image-pixels", str(pick("max_image_pixels")),
@@ -539,7 +554,7 @@ def cmd_serve(args):
     overrides = {k: getattr(args, k, None) for k in
                  ("port", "host", "max_queued", "max_tokens_cap",
                   "memory_limit_gb", "cache_limit_gb", "gen_timeout_s",
-                  "max_prompt_tokens", "prompt_cache", "thinking",
+                  "max_prompt_tokens", "context_window", "prompt_cache", "thinking",
                   "max_image_pixels", "image_steps", "worker_idle_timeout_s")}
     if not args.name:
         argv = [sys.executable, "-m", "mlxh.manager_app"]
@@ -1709,6 +1724,7 @@ def main():
     p.add_argument("--cache-limit-gb", type=float, dest="cache_limit_gb")
     p.add_argument("--gen-timeout-s", type=int, dest="gen_timeout_s")
     p.add_argument("--max-prompt-tokens", type=int, dest="max_prompt_tokens")
+    p.add_argument("--context-window", type=int, dest="context_window")
     p.add_argument("--prompt-cache", dest="prompt_cache")
     p.add_argument("--thinking", choices=["auto", "on", "off"], dest="thinking")
     p.add_argument("--max-image-pixels", type=int)

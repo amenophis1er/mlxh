@@ -18,10 +18,10 @@ def mdir(tmp_path, monkeypatch):
     return d
 
 
-def make_model(mdir, name, repo=None, rev=REV):
+def make_model(mdir, name, repo=None, rev=REV, config=None):
     p = mdir / name
     p.mkdir()
-    (p / "config.json").write_text("{}")
+    (p / "config.json").write_text(json.dumps(config or {}))
     if repo:
         (p / ".mlxh.json").write_text(json.dumps({"repo": repo, "revision": rev}))
     return p
@@ -346,12 +346,24 @@ def test_total_ram_positive():
 
 
 def test_list_output(mdir, capsys):
-    make_model(mdir, "m1", repo="org/model")
+    make_model(mdir, "m1", repo="org/model",
+               config={"max_position_embeddings": 32768})
+    make_model(mdir, "m2")
     cli.cmd_list(None)
     out = capsys.readouterr().out
     assert "m1" in out
+    assert "32k" in out
     assert "org/model@aaaaaaa" in out
     assert "pulled" in out
+
+
+def test_list_context_column_blank_when_unknown(mdir, capsys):
+    make_model(mdir, "plain")
+    cli.cmd_list(None)
+    out = capsys.readouterr().out
+    assert "CTX" in out
+    # no detected window: the row shows the empty CTX cell and stays table-clean
+    assert "plain " in out
 
 
 def test_serve_argv_includes_all_knobs(mdir):
@@ -359,8 +371,10 @@ def test_serve_argv_includes_all_knobs(mdir):
     cfg = cli.load_config()
     argv = cli.serve_argv(cfg, "m1", "/p", {"port": 9999})
     assert "--max-prompt-tokens" in argv and "--port" in argv
+    assert "--context-window" in argv
     assert argv[argv.index("--port") + 1] == "9999"
     assert argv[argv.index("--max-prompt-tokens") + 1] == str(cfg["max_prompt_tokens"])
+    assert argv[argv.index("--context-window") + 1] == str(cfg["context_window"])
 
 
 def test_pi_register_provider(tmp_path):

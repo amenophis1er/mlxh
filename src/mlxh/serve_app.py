@@ -113,6 +113,7 @@ SETTINGS = {
     "cache_limit_gb": 0.0,    # MLX buffer-cache limit; 0 = off
     "gen_timeout_s": 600,     # hard stop for one generation; 0 = off
     "max_prompt_tokens": 8192,  # reject bigger prompts (KV cache = memory); 0 = off
+    "context_window": 0,   # model context window: 0 = detect, -1 = off, N = override
     "prompt_cache": True,   # reuse KV blocks across requests (agents: huge TTFT win)
     "thinking": "auto",     # reasoning mode: auto (model default) / on / off
     "max_image_pixels": 4194304,
@@ -741,10 +742,11 @@ def cancel_private_request(request_id: str, request: Request):
 
 @app.get("/v1/models")
 def models():
-    return {
-        "object": "list",
-        "data": [{"id": MODEL_ID, "object": "model", "owned_by": "mlxh"}],
-    }
+    window = getattr(engine, "context_window", None) if engine else None
+    model = {"id": MODEL_ID, "object": "model", "owned_by": "mlxh"}
+    if window:
+        model["context_length"] = int(window)
+    return {"object": "list", "data": [model]}
 
 
 @app.post("/v1/chat/completions")
@@ -875,6 +877,7 @@ def main():
     ap.add_argument("--cache-limit-gb", type=float, default=SETTINGS["cache_limit_gb"])
     ap.add_argument("--gen-timeout-s", type=int, default=SETTINGS["gen_timeout_s"])
     ap.add_argument("--max-prompt-tokens", type=int, default=SETTINGS["max_prompt_tokens"])
+    ap.add_argument("--context-window", type=int, default=SETTINGS["context_window"])
     ap.add_argument("--prompt-cache", default=str(SETTINGS["prompt_cache"]))
     ap.add_argument("--thinking", choices=["auto", "on", "off"],
                     default=SETTINGS["thinking"])
@@ -885,6 +888,7 @@ def main():
         max_queued=args.max_queued, max_tokens_cap=args.max_tokens_cap,
         memory_limit_gb=args.memory_limit_gb, cache_limit_gb=args.cache_limit_gb,
         gen_timeout_s=args.gen_timeout_s, max_prompt_tokens=args.max_prompt_tokens,
+        context_window=args.context_window,
         prompt_cache=str(args.prompt_cache).lower() in ("1", "true", "on", "yes"),
         thinking=args.thinking,
         max_image_pixels=args.max_image_pixels, image_steps=args.image_steps,

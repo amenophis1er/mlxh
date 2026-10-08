@@ -175,6 +175,7 @@ class ModelWorkers:
         mlx = info.get("mlx") or {}
         return {
             "model_kind": info.get("model_kind"),
+            "context_window": info.get("context_window"),
             "pid": runtime.get("pid"),
             "queue_depth": runtime.get("queue_depth"),
             "requests": runtime.get("requests"),

@@ -267,11 +267,16 @@ async def info(request: Request):
 @app.get("/v1/models")
 def models():
     _refresh_models()
+    from .loader import context_window_of
     models = MODELS
-    return {"object": "list", "data": [
-        {"id": name, "object": "model", "owned_by": "mlxh"}
-        for name in sorted(models)
-    ]}
+    data = []
+    for name in sorted(models):
+        window = context_window_of(models[name])
+        item = {"id": name, "object": "model", "owned_by": "mlxh"}
+        if window:
+            item["context_length"] = window
+        data.append(item)
+    return {"object": "list", "data": data}
 
 
 def _model_from_request(request: Request, body: bytes) -> str:
@@ -445,6 +450,7 @@ def main():
     for arg, key in (("max-queued", "max_queued"), ("max-tokens-cap", "max_tokens_cap"),
                      ("memory-limit-gb", "memory_limit_gb"), ("cache-limit-gb", "cache_limit_gb"),
                      ("gen-timeout-s", "gen_timeout_s"), ("max-prompt-tokens", "max_prompt_tokens"),
+                     ("context-window", "context_window"),
                      ("prompt-cache", "prompt_cache"), ("thinking", "thinking"),
                      ("max-image-pixels", "max_image_pixels"), ("image-steps", "image_steps")):
         parser.add_argument("--" + arg, default=None)

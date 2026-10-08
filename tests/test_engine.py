@@ -116,3 +116,43 @@ def test_public_timeout_is_not_reported_as_normal_completion(monkeypatch):
     response = client.post("/v1/responses", json={"input": "hi"}).json()
     assert response["status"] == "incomplete"
     assert response["incomplete_details"] == {"reason": "max_output_tokens"}
+
+
+def test_resolve_context_window_detects_overrides_and_disables():
+    engine = InferenceEngine("/unused", "test", {**SETTINGS})
+    engine.runner = NS(context_window=32768)
+    assert engine.context_window is None  # resolution happens on load
+    assert engine._resolve_context_window() == 32768  # 0 = detect
+    engine.settings["context_window"] = -1
+    assert engine._resolve_context_window() is None  # -1 = off
+    engine.settings["context_window"] = 8192
+    assert engine._resolve_context_window() == 8192  # explicit override wins
+
+
+def test_resolve_context_window_without_setting_or_detection():
+    # settings without the key (older fixtures) behave like 0 = detect
+    engine = InferenceEngine("/unused", "test", {k: v for k, v in SETTINGS.items()})
+    engine.runner = NS(context_window=None)
+    assert engine._resolve_context_window() is None
+    engine.runner = NS()
+    assert engine._resolve_context_window() is None
+
+
+def test_snapshot_reports_context_window():
+    engine = InferenceEngine("/unused", "test", {**SETTINGS})
+    engine.context_window = 262144
+    assert engine.snapshot()["context_window"] == 262144
+    engine.context_window = None
+    assert engine.snapshot()["context_window"] is None
+
+
+def test_models_endpoint_reports_detected_context_length(monkeypatch):
+    monkeypatch.setattr(serve_app, "engine", NS(context_window=32768))
+    data = TestClient(serve_app.app).get("/v1/models").json()["data"]
+    assert data[0]["context_length"] == 32768
+
+
+def test_models_endpoint_omits_unknown_context_length(monkeypatch):
+    monkeypatch.setattr(serve_app, "engine", NS(context_window=None))
+    data = TestClient(serve_app.app).get("/v1/models").json()["data"]
+    assert "context_length" not in data[0]

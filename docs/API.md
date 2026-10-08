@@ -199,6 +199,7 @@ Returns the configuration and live diagnostics of this local server process:
 ```json
 {
   "model": "bonsai2",
+  "context_window": 262144,
   "settings": {"max_queued": 4, "max_tokens_cap": 16384},
   "capabilities": {"images": true, "chat_protocol": 1},
   "mlx": {
@@ -240,6 +241,13 @@ until restart. `mlxh status` presents this endpoint as a table and `mlxh status
 time; `last_request` is a single completion/failure/timeout/cancellation
 snapshot, not retained history. The version and capability fields are used by
 the terminal client to reject an old server cleanly.
+
+`context_window` (top level) is the model's context window in tokens as
+configured on this server: detected from the model's `config.json`
+(`max_position_embeddings` and friends, including `text_config`), overridden
+with `mlxh config context_window N`, or disabled with `-1`. It is `null` when
+nothing usable is known. `GET /v1/models` exposes the same value as the OpenAI
+`context_length` model field in both fixed-model and manager mode.
 
 `POST /mlxh/generate` and `DELETE /mlxh/requests/{id}` are versioned,
 localhost-only implementation details used by `mlxh chat`; they are not public

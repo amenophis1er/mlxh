@@ -144,6 +144,7 @@ class EngineLifecycle:
         self.ready = threading.Event()
         self.failed: BaseException | None = None
         self.started = time.monotonic()
+        self.context_window: int | None = None
         self._stats = {
             "requests": 0,
             "tokens_generated": 0,
@@ -227,6 +228,23 @@ class EngineLifecycle:
         if self.settings["cache_limit_gb"] > 0:
             mx.set_cache_limit(int(self.settings["cache_limit_gb"] * 1e9))
 
+    def _resolve_context_window(self):
+        """Effective model context window from the `context_window` setting.
+
+        -1 disables window use entirely, 0 (default) uses the value detected
+        from the model config, and a positive value overrides detection. None
+        means no usable window is known.
+        """
+        override = self.settings.get("context_window", 0) or 0
+        if override < 0:
+            return None
+        if override > 0:
+            return override
+        detected = getattr(self.runner, "context_window", None)
+        if isinstance(detected, int) and not isinstance(detected, bool) and detected > 0:
+            return detected
+        return None
+
     def _snapshot_peak(self, mx):
         try:
             self._set("last_peak_memory_bytes", int(mx.get_peak_memory()))
@@ -245,6 +263,7 @@ class InferenceEngine(EngineLifecycle):
             print(f"Loading {self.model_id} from {self.model_path}...", flush=True)
             started = time.perf_counter()
             self.runner = load_runner(self.model_path)
+            self.context_window = self._resolve_context_window()
             if (self.settings["prompt_cache"]
                     and getattr(self.runner, "supports_cache", False)):
                 self.runner.enable_cache()
@@ -254,8 +273,9 @@ class InferenceEngine(EngineLifecycle):
                 mx.reset_peak_memory()
             except Exception as exc:
                 print(f"[mlx] stats error: {exc}", flush=True)
+            context = f", context {self.context_window}" if self.context_window else ""
             print(f"Ready in {time.perf_counter() - started:.1f}s "
-                  f"(images: {'yes' if self.runner.supports_images else 'no'})",
+                  f"(images: {'yes' if self.runner.supports_images else 'no'}{context})",
                   flush=True)
             self.ready.set()
         except BaseException as exc:
@@ -495,6 +515,7 @@ class InferenceEngine(EngineLifecycle):
         return {
             "model": self.model_id,
             "model_kind": self.model_kind,
+            "context_window": self.context_window,
             "settings": self.settings,
             "capabilities": {"images": self.supports_images, "chat_protocol": 1,
                              "image_generation": False,

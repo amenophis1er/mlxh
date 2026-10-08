@@ -25,8 +25,10 @@ class VLMRunner:
     supports_images = True
     supports_cache = True
 
-    def __init__(self, model, processor, config):
+    def __init__(self, model, processor, config, context_window=None):
         self.model, self.processor, self.config = model, processor, config
+        # Detected model context window (in tokens); None when unknown.
+        self.context_window = context_window
         self.apc = None
 
     def enable_cache(self, num_blocks=4096, block_size=16):
@@ -68,8 +70,9 @@ class TextRunner:
     supports_images = False
     supports_cache = False  # text-only models: caching lands later
 
-    def __init__(self, model, tokenizer):
+    def __init__(self, model, tokenizer, context_window=None):
         self.model, self.tokenizer = model, tokenizer
+        self.context_window = context_window
 
     def template(self, messages, num_images=0, tools=None, thinking=None):
         kwargs = {"tools": tools} if tools else {}
@@ -109,23 +112,59 @@ def _quiet_libraries():
         pass
 
 
+_POSITION_KEYS = ("max_position_embeddings", "n_positions", "context_length")
+
+
+def detect_context_window(config):
+    """Best-effort context window (in tokens) from a HF-style config dict.
+
+    Flat text models carry `max_position_embeddings` at the top level; most
+    vision models and Prism packs nest the text model under `text_config`
+    (older layouts use `language_config`). There is deliberately no rope_scaling
+    math: scaled windows are model-specific, so a model whose config
+    understates (or overstates) its practical window can be overridden with the
+    `context_window` config key. Returns None when unknown.
+    """
+    scopes = [config, config.get("text_config"), config.get("language_config")]
+    for scope in scopes:
+        if not isinstance(scope, dict):
+            continue
+        for key in _POSITION_KEYS:
+            value = scope.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                return value
+    return None
+
+
+def context_window_of(model_path):
+    """Detected context window for a model directory, or None."""
+    try:
+        config = json.loads((Path(model_path) / "config.json").read_text())
+    except (OSError, ValueError, TypeError):
+        return None
+    if not isinstance(config, dict):
+        return None
+    return detect_context_window(config)
+
+
 def load_runner(model_dir):
     _quiet_libraries()
     model_dir = Path(model_dir)
     cfg_path = model_dir / "config.json"
     cfg = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
     model_type = cfg.get("model_type", "")
+    context_window = detect_context_window(cfg)
 
     if model_type.startswith("prism_") and (model_dir / "runtime").is_dir():
         sys.path.insert(0, str(model_dir / "runtime"))
         if cfg.get("components", {}).get("vision"):
             from vision_artifact import chat_config, load_vl_model
             model, processor, config = load_vl_model(model_dir)
-            return VLMRunner(model, processor, chat_config(config))
+            return VLMRunner(model, processor, chat_config(config), context_window)
         from artifact import load_model
         from mlx_lm.utils import load_tokenizer
         model, _ = load_model(model_dir)
-        return TextRunner(model, load_tokenizer(model_dir))
+        return TextRunner(model, load_tokenizer(model_dir), context_window)
 
     def _short(e, n=180):
         s = " ".join(str(e).split())
@@ -135,12 +174,12 @@ def load_runner(model_dir):
         from mlx_vlm import load as vlm_load
         from mlx_vlm.utils import load_config
         model, processor = vlm_load(str(model_dir))
-        return VLMRunner(model, processor, load_config(str(model_dir)))
+        return VLMRunner(model, processor, load_config(str(model_dir)), context_window)
     except Exception as vlm_err:
         try:
             from mlx_lm import load as lm_load
             model, tokenizer = lm_load(str(model_dir))
-            return TextRunner(model, tokenizer)
+            return TextRunner(model, tokenizer, context_window)
         except Exception as lm_err:
             raise RuntimeError(
                 f"cannot load '{model_dir.name}' with the installed MLX stack\n"

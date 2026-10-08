@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Context windows**: mlxh now detects each model's context window
+  (`max_position_embeddings` and friends, including `text_config` nesting used
+  by vision models and Prism packs) and surfaces it in `mlxh list` (CTX
+  column), `GET /v1/models` (`context_length`), and `GET /mlxh/info`. The
+  `context_window` setting overrides detection (`0` = detect, `-1` = off,
+  `N` = fixed window for models whose config understates the real one).
+
 ## v0.2.0 — 2026-09-25
 
 - **Model manager**: `mlxh serve` now starts a model-free API manager that loads

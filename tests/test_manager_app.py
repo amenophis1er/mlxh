@@ -456,3 +456,20 @@ HTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
                 break
             time.sleep(0.1)
         assert test_client.get("/mlxh/info").json()["workers"] == []
+
+
+def test_manager_models_report_detected_context_length(client, monkeypatch, tmp_path):
+    import json as _json
+    d = tmp_path / "alpha"
+    d.mkdir()
+    (d / "config.json").write_text(_json.dumps({"max_position_embeddings": 32768}))
+    monkeypatch.setattr(manager, "MODELS", {"alpha": str(d), "beta": "/nonexistent"})
+    import json
+    from pathlib import Path
+    monkeypatch.setattr("mlxh.cli.discover", lambda _cfg: {
+        "alpha": Path(d), "beta": Path("/nonexistent"),
+    })
+    data = {item["id"]: item
+            for item in client.get("/v1/models").json()["data"]}
+    assert data["alpha"]["context_length"] == 32768
+    assert "context_length" not in data["beta"]

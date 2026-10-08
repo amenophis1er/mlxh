@@ -93,6 +93,7 @@ Set persistently with `mlxh config <key> <value>`, or per run with
 | `cache_limit_gb` | 0 (off) | MLX buffer-cache limit (frees memory between requests) |
 | `gen_timeout_s` | 600 | hard stop for a single generation (0 = off) |
 | `max_prompt_tokens` | 8192 | reject larger prompts with a 400 (0 = off) |
+| `context_window` | 0 = detect | model context window in tokens, shown in `mlxh list`, `/v1/models` and `/mlxh/info`; 0 detects it from the model's `config.json`, `-1` disables detection, `N` overrides it (for models whose config understates the window, e.g. YaRN-scaled) |
 | `prompt_cache` | true | reuse KV blocks across requests — same-prefix follow-ups skip reprocessing (agents: 4-20x faster TTFT) |
 | `thinking` | auto | model reasoning: `auto` (model default), `on`, `off` |
 | `max_image_pixels` | 4194304 | image width × height ceiling (also subject to model limits) |
