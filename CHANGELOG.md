@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Prefix cache for text-only models**: `TextRunner` (models loaded through
+  mlx-lm, including Prism text packs) now reuses the KV cache across requests
+  via mlx-lm's `LRUPromptCache`, so agent follow-up turns only process new
+  tokens. Bounded by the new `prompt_cache_gb` setting (0 = auto: 25% of the
+  memory limit) and 32 entries; `mlxh status` shows entries, size and hits.
+- **Install/service fixes**: `install.sh` works under macOS bash 3.2 without
+  `GITHUB_TOKEN`; `mlxh service restart` waits for launchd to drop the job;
+  the manager refuses unknown paths before loading a worker.
+
 ## v0.2.0 — 2026-09-25
 
 - **Model manager**: `mlxh serve` now starts a model-free API manager that loads

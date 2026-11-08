@@ -114,6 +114,7 @@ SETTINGS = {
     "gen_timeout_s": 600,     # hard stop for one generation; 0 = off
     "max_prompt_tokens": 8192,  # reject bigger prompts (KV cache = memory); 0 = off
     "prompt_cache": True,   # reuse KV blocks across requests (agents: huge TTFT win)
+    "prompt_cache_gb": 0.0,  # text prefix-cache cap; 0 = auto (25% of memory limit)
     "thinking": "auto",     # reasoning mode: auto (model default) / on / off
     "max_image_pixels": 4194304,
     "image_steps": 0,
@@ -876,6 +877,7 @@ def main():
     ap.add_argument("--gen-timeout-s", type=int, default=SETTINGS["gen_timeout_s"])
     ap.add_argument("--max-prompt-tokens", type=int, default=SETTINGS["max_prompt_tokens"])
     ap.add_argument("--prompt-cache", default=str(SETTINGS["prompt_cache"]))
+    ap.add_argument("--prompt-cache-gb", type=float, default=SETTINGS["prompt_cache_gb"])
     ap.add_argument("--thinking", choices=["auto", "on", "off"],
                     default=SETTINGS["thinking"])
     ap.add_argument("--max-image-pixels", type=int, default=4194304)
@@ -886,6 +888,7 @@ def main():
         memory_limit_gb=args.memory_limit_gb, cache_limit_gb=args.cache_limit_gb,
         gen_timeout_s=args.gen_timeout_s, max_prompt_tokens=args.max_prompt_tokens,
         prompt_cache=str(args.prompt_cache).lower() in ("1", "true", "on", "yes"),
+        prompt_cache_gb=args.prompt_cache_gb,
         thinking=args.thinking,
         max_image_pixels=args.max_image_pixels, image_steps=args.image_steps,
     )

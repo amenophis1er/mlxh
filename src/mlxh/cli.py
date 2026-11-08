@@ -34,6 +34,7 @@ Config keys (mlxh config <key> <value>):
   gen_timeout_s       hard stop for one generation, 0 = off (600)
   max_prompt_tokens   reject prompts bigger than this, 0 = off (8192)
   prompt_cache        reuse KV blocks across requests (true)
+  prompt_cache_gb     text prefix-cache cap in GB, 0 = auto (25% of memory limit)
   thinking            model reasoning: auto / on / off (auto)
   chat_tools          load ~/.mlxh/tools.py in chat by default (false)
   service_model       deprecated; service now starts the model manager
@@ -77,6 +78,7 @@ DEFAULTS = {
     "gen_timeout_s": 600,
     "max_prompt_tokens": 8192,
     "prompt_cache": True,
+    "prompt_cache_gb": 0.0,
     "thinking": "auto",
     "chat_tools": False,
     "service_model": "",
@@ -103,6 +105,7 @@ KEY_TYPES = {
     "port": int, "host": str, "models_dir": str, "max_queued": int,
     "max_tokens_cap": int, "memory_limit_gb": float, "cache_limit_gb": float,
     "gen_timeout_s": int, "max_prompt_tokens": int, "prompt_cache": _bool,
+    "prompt_cache_gb": float,
     "thinking": str, "chat_tools": _bool, "service_model": str,
     "max_image_pixels": int, "image_steps": int,
     "worker_idle_timeout_s": _idle_timeout,
@@ -265,6 +268,13 @@ def cmd_search(args):
         print(f"{m.id:{rw}} {params_of(m):>7} {size:>8} {m.downloads or 0:>10,}  {updated}")
     print()
     ui.note("install one with: mlxh pull <repo-id>")
+
+
+def _format_prompt_cache(stats):
+    if not stats:
+        return "—"
+    return (f"{stats['entries']} seq {_format_gb(stats['bytes'])}"
+            f" ({stats['hits']} hits)")
 
 
 def total_ram_bytes():
@@ -528,6 +538,7 @@ def serve_argv(cfg, name, path, overrides=None):
         "--gen-timeout-s", str(pick("gen_timeout_s")),
         "--max-prompt-tokens", str(pick("max_prompt_tokens")),
         "--prompt-cache", str(pick("prompt_cache")),
+        "--prompt-cache-gb", str(pick("prompt_cache_gb")),
         "--thinking", str(pick("thinking")),
         "--max-image-pixels", str(pick("max_image_pixels")),
         "--image-steps", str(pick("image_steps")),
@@ -539,8 +550,9 @@ def cmd_serve(args):
     overrides = {k: getattr(args, k, None) for k in
                  ("port", "host", "max_queued", "max_tokens_cap",
                   "memory_limit_gb", "cache_limit_gb", "gen_timeout_s",
-                  "max_prompt_tokens", "prompt_cache", "thinking",
-                  "max_image_pixels", "image_steps", "worker_idle_timeout_s")}
+                  "max_prompt_tokens", "prompt_cache", "prompt_cache_gb",
+                  "thinking", "max_image_pixels", "image_steps",
+                  "worker_idle_timeout_s")}
     if not args.name:
         argv = [sys.executable, "-m", "mlxh.manager_app"]
         for key, value in overrides.items():
@@ -652,9 +664,10 @@ def cmd_status(args):
         _human_value(mlx.get("active_memory_bytes"), _format_gb),
         _human_value(mlx.get("cache_memory_bytes"), _format_gb),
         _human_value(mlx.get("last_peak_memory_bytes"), _format_gb),
+        _format_prompt_cache(info.get("prompt_cache")),
     ]
     headers = ["MODEL", "PID", "UPTIME", "STATE", "QUEUE", "REQ",
-               "PROMPT", "OUTPUT", "ACTIVE", "CACHE", "PEAK"]
+               "PROMPT", "OUTPUT", "ACTIVE", "CACHE", "PEAK", "PREFIX CACHE"]
     if info.get("model_kind") == "image":
         headers[6:8] = ["IMAGES"]
         values[6:8] = [_human_value(runtime.get("images_generated"))]
@@ -1552,7 +1565,8 @@ def cmd_home(parser):
         cmd_serve(NS(name=None, port=None, host=None, max_queued=None,
                      max_tokens_cap=None, memory_limit_gb=None,
                      cache_limit_gb=None, gen_timeout_s=None,
-                     max_prompt_tokens=None, prompt_cache=None, thinking=None,
+                     max_prompt_tokens=None, prompt_cache=None,
+                     prompt_cache_gb=None, thinking=None,
                      max_image_pixels=None, image_steps=None,
                      worker_idle_timeout_s=None))
 
@@ -1710,6 +1724,7 @@ def main():
     p.add_argument("--gen-timeout-s", type=int, dest="gen_timeout_s")
     p.add_argument("--max-prompt-tokens", type=int, dest="max_prompt_tokens")
     p.add_argument("--prompt-cache", dest="prompt_cache")
+    p.add_argument("--prompt-cache-gb", type=float, dest="prompt_cache_gb")
     p.add_argument("--thinking", choices=["auto", "on", "off"], dest="thinking")
     p.add_argument("--max-image-pixels", type=int)
     p.add_argument("--image-steps", type=int)

@@ -116,3 +116,20 @@ def test_public_timeout_is_not_reported_as_normal_completion(monkeypatch):
     response = client.post("/v1/responses", json={"input": "hi"}).json()
     assert response["status"] == "incomplete"
     assert response["incomplete_details"] == {"reason": "max_output_tokens"}
+
+
+def test_prompt_cache_cap_follows_setting_then_memory_limit(monkeypatch):
+    monkeypatch.setattr("mlxh.cli.total_ram_bytes", lambda: 64 * 10**9)
+    explicit = InferenceEngine("/unused", "m", {**SETTINGS, "prompt_cache_gb": 3})
+    assert explicit._prompt_cache_bytes() == 3 * 10**9
+    limited = InferenceEngine("/unused", "m", {**SETTINGS, "memory_limit_gb": 40})
+    assert limited._prompt_cache_bytes() == 10 * 10**9
+    unlimited = InferenceEngine("/unused", "m", dict(SETTINGS))
+    assert unlimited._prompt_cache_bytes() == int(64 * 10**9 * 0.2)
+
+
+def test_snapshot_reports_prefix_cache_only_for_runners_that_have_one():
+    engine = InferenceEngine("/unused", "m", dict(SETTINGS))
+    assert engine.snapshot()["prompt_cache"] is None
+    engine.runner = NS(cache_stats=lambda: {"entries": 2}, supports_images=False)
+    assert engine.snapshot()["prompt_cache"] == {"entries": 2}

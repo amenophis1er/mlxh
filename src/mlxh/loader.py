@@ -66,10 +66,56 @@ class VLMRunner:
 
 class TextRunner:
     supports_images = False
-    supports_cache = False  # text-only models: caching lands later
+    supports_cache = True
 
     def __init__(self, model, tokenizer):
         self.model, self.tokenizer = model, tokenizer
+        self.prompt_cache = None
+        self.cache_hits = 0
+        self.cache_misses = 0
+        self.cached_tokens_total = 0
+
+    def enable_cache(self, max_bytes, max_entries=32):
+        """Prefix caching: keep finished KV caches, reuse the longest prefix.
+
+        Mirrors mlx_lm.server: entries are keyed by prompt + generated tokens
+        so the next agent turn (which echoes the assistant reply) hits. The
+        LRU is bounded by bytes and entries; eviction happens on insert.
+        """
+        from mlx_lm.models.cache import LRUPromptCache
+        self.prompt_cache = LRUPromptCache(max_size=max_entries, max_bytes=int(max_bytes))
+        self._cache_key = "model"  # trie key; nn.Module itself is not hashable
+
+    def cache_stats(self):
+        if self.prompt_cache is None:
+            return None
+        return {
+            "entries": len(self.prompt_cache),
+            "bytes": int(self.prompt_cache.nbytes),
+            "max_bytes": int(self.prompt_cache.max_bytes),
+            "hits": self.cache_hits,
+            "misses": self.cache_misses,
+            "cached_tokens_total": self.cached_tokens_total,
+        }
+
+    def _fetch_cache(self, tokens):
+        """Return (cache, tokens_to_process, cached_count) for this prompt."""
+        from mlx_lm.models.cache import (
+            can_trim_prompt_cache, make_prompt_cache, trim_prompt_cache,
+        )
+        cache, rest = self.prompt_cache.fetch_nearest_cache(self._cache_key, tokens)
+        if cache is not None and not rest:
+            # Exact hit: the model still needs to see at least one token to
+            # produce logits, so step back by one when the cache allows it.
+            if can_trim_prompt_cache(cache):
+                trim_prompt_cache(cache, 1)
+                rest = tokens[-1:]
+            else:
+                cache, rest = None, tokens
+        if cache is None:
+            cache = make_prompt_cache(self.model)
+            rest = tokens
+        return cache, list(rest), len(tokens) - len(rest)
 
     def template(self, messages, num_images=0, tools=None, thinking=None):
         kwargs = {"tools": tools} if tools else {}
@@ -91,9 +137,33 @@ class TextRunner:
             )
         if logits_processors:
             kwargs["logits_processors"] = logits_processors
-        yield from stream_generate(
-            self.model, self.tokenizer, prompt, max_tokens=max_tokens, **kwargs
-        )
+
+        cache = None
+        cached = 0
+        tokens = list(prompt) if not isinstance(prompt, str) else None
+        if self.prompt_cache is not None and tokens is not None:
+            cache, prompt, cached = self._fetch_cache(tokens)
+            kwargs["prompt_cache"] = cache
+            if cached:
+                self.cache_hits += 1
+                self.cached_tokens_total += cached
+            else:
+                self.cache_misses += 1
+        key = list(tokens) if tokens is not None else None
+        try:
+            for response in stream_generate(
+                self.model, self.tokenizer, prompt, max_tokens=max_tokens, **kwargs
+            ):
+                response.cached_tokens = cached
+                # Report the full prompt, not just the uncached suffix.
+                response.prompt_tokens = (response.prompt_tokens or 0) + cached
+                if key is not None:
+                    key.append(response.token)
+                yield response
+        finally:
+            if cache is not None and key is not None and len(key) > len(tokens):
+                # Also saved on cancel/error: the generated prefix is valid.
+                self.prompt_cache.insert_cache(self._cache_key, key, cache)
 
     def decode_token(self, token_id: int) -> str:
         return self.tokenizer.decode([token_id])

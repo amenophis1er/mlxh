@@ -94,6 +94,7 @@ Set persistently with `mlxh config <key> <value>`, or per run with
 | `gen_timeout_s` | 600 | hard stop for a single generation (0 = off) |
 | `max_prompt_tokens` | 8192 | reject larger prompts with a 400 (0 = off) |
 | `prompt_cache` | true | reuse KV blocks across requests — same-prefix follow-ups skip reprocessing (agents: 4-20x faster TTFT) |
+| `prompt_cache_gb` | 0 | byte cap for the text-model prefix cache (LRU); 0 = auto: 25% of the memory limit, or 20% of RAM when no limit is set |
 | `thinking` | auto | model reasoning: `auto` (model default), `on`, `off` |
 | `max_image_pixels` | 4194304 | image width × height ceiling (also subject to model limits) |
 | `image_steps` | 0 | image denoising steps; 0 uses the selected model's MFLUX default, maximum 100 |

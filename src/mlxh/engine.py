@@ -247,8 +247,7 @@ class InferenceEngine(EngineLifecycle):
             self.runner = load_runner(self.model_path)
             if (self.settings["prompt_cache"]
                     and getattr(self.runner, "supports_cache", False)):
-                self.runner.enable_cache()
-                print("[apc] prompt cache enabled (65k-token block pool)", flush=True)
+                self._enable_prompt_cache()
             try:
                 self._set("last_peak_memory_bytes", int(mx.get_peak_memory()))
                 mx.reset_peak_memory()
@@ -337,6 +336,28 @@ class InferenceEngine(EngineLifecycle):
                 except Exception as exc:
                     print(f"[mlx] stats error: {exc}", flush=True)
                 self._finish_job(job)
+
+    def _prompt_cache_bytes(self):
+        """Byte cap for the text prefix cache: prompt_cache_gb, 0 = auto."""
+        from .cli import total_ram_bytes
+        configured = float(self.settings.get("prompt_cache_gb", 0) or 0)
+        if configured > 0:
+            return int(configured * 1e9)
+        limit = self.settings["memory_limit_gb"]
+        if limit > 0:
+            return int(limit * 1e9 * 0.25)
+        ram = total_ram_bytes()
+        return int(ram * 0.2) if ram else 8 * 10**9
+
+    def _enable_prompt_cache(self):
+        if hasattr(self.runner, "prompt_cache"):
+            max_bytes = self._prompt_cache_bytes()
+            self.runner.enable_cache(max_bytes)
+            print(f"[cache] prefix cache enabled (cap {max_bytes / 1e9:.1f} GB, "
+                  "prompt_cache_gb overrides)", flush=True)
+        else:
+            self.runner.enable_cache()
+            print("[apc] prompt cache enabled (65k-token block pool)", flush=True)
 
     @staticmethod
     def _last_snapshot(job: Job, terminal: GenerationTerminal):
@@ -500,6 +521,8 @@ class InferenceEngine(EngineLifecycle):
                              "image_generation": False,
                              "image_edits": self.supports_image_edits},
             "mlx": mlx_stats,
+            "prompt_cache": (self.runner.cache_stats()
+                             if getattr(self.runner, "cache_stats", None) else None),
             "runtime": {
                 "engine_version": 1,
                 "uptime_s": int(time.monotonic() - self.started),
