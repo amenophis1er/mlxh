@@ -124,8 +124,18 @@ def test_prompt_cache_cap_follows_setting_then_memory_limit(monkeypatch):
     assert explicit._prompt_cache_bytes() == 3 * 10**9
     limited = InferenceEngine("/unused", "m", {**SETTINGS, "memory_limit_gb": 40})
     assert limited._prompt_cache_bytes() == 10 * 10**9
-    unlimited = InferenceEngine("/unused", "m", dict(SETTINGS))
-    assert unlimited._prompt_cache_bytes() == int(64 * 10**9 * 0.2)
+    auto = InferenceEngine("/unused", "m", {**SETTINGS, "memory_limit_gb": 0})
+    assert auto._prompt_cache_bytes() == int(64 * 10**9 * 0.8 * 0.25)
+    disabled = InferenceEngine("/unused", "m", dict(SETTINGS))  # memory_limit_gb=-1
+    assert disabled._prompt_cache_bytes() == int(64 * 10**9 * 0.2)
+
+
+def test_every_runner_shares_the_enable_cache_contract(monkeypatch):
+    seen = []
+    engine = InferenceEngine("/unused", "m", {**SETTINGS, "prompt_cache_gb": 1})
+    engine.runner = NS(enable_cache=lambda max_bytes: seen.append(max_bytes) or "on")
+    engine._enable_prompt_cache()
+    assert seen == [10**9]
 
 
 def test_snapshot_reports_prefix_cache_only_for_runners_that_have_one():

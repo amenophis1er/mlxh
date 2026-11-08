@@ -212,18 +212,24 @@ class EngineLifecycle:
         with self._stats_lock:
             self._stats[key] = value
 
-    def _configure_memory(self, mx):
+    def _resolve_memory_limit(self):
+        """Effective MLX memory limit in bytes, or None when disabled (-1)."""
         from .cli import total_ram_bytes
         limit = self.settings["memory_limit_gb"]
         if limit > 0:
-            mx.set_memory_limit(int(limit * 1e9))
-            print(f"[mlx] memory limit {limit} GB", flush=True)
-        elif limit == 0:
+            return int(limit * 1e9)
+        if limit == 0:
             ram = total_ram_bytes()
-            if ram:
-                mx.set_memory_limit(int(ram * 0.8))
-                print(f"[mlx] memory limit {ram * 0.8 / 1e9:.0f} GB "
-                      "(auto 80% of RAM; memory_limit_gb overrides, -1 disables)", flush=True)
+            return int(ram * 0.8) if ram else None
+        return None
+
+    def _configure_memory(self, mx):
+        self.memory_limit_bytes = self._resolve_memory_limit()
+        if self.memory_limit_bytes is not None:
+            mx.set_memory_limit(self.memory_limit_bytes)
+            note = ("" if self.settings["memory_limit_gb"] > 0
+                    else " (auto 80% of RAM; memory_limit_gb overrides, -1 disables)")
+            print(f"[mlx] memory limit {self.memory_limit_bytes / 1e9:.0f} GB{note}", flush=True)
         if self.settings["cache_limit_gb"] > 0:
             mx.set_cache_limit(int(self.settings["cache_limit_gb"] * 1e9))
 
@@ -338,26 +344,27 @@ class InferenceEngine(EngineLifecycle):
                 self._finish_job(job)
 
     def _prompt_cache_bytes(self):
-        """Byte cap for the text prefix cache: prompt_cache_gb, 0 = auto."""
+        """Byte cap for the text prefix cache.
+
+        prompt_cache_gb when set; else 25% of the effective memory limit;
+        else (limit disabled) 20% of RAM.
+        """
         from .cli import total_ram_bytes
         configured = float(self.settings.get("prompt_cache_gb", 0) or 0)
         if configured > 0:
             return int(configured * 1e9)
-        limit = self.settings["memory_limit_gb"]
-        if limit > 0:
-            return int(limit * 1e9 * 0.25)
+        limit = getattr(self, "memory_limit_bytes", None)
+        if limit is None:
+            limit = self._resolve_memory_limit()
+        if limit:
+            return int(limit * 0.25)
         ram = total_ram_bytes()
         return int(ram * 0.2) if ram else 8 * 10**9
 
     def _enable_prompt_cache(self):
-        if hasattr(self.runner, "prompt_cache"):
-            max_bytes = self._prompt_cache_bytes()
-            self.runner.enable_cache(max_bytes)
-            print(f"[cache] prefix cache enabled (cap {max_bytes / 1e9:.1f} GB, "
-                  "prompt_cache_gb overrides)", flush=True)
-        else:
-            self.runner.enable_cache()
-            print("[apc] prompt cache enabled (65k-token block pool)", flush=True)
+        banner = self.runner.enable_cache(self._prompt_cache_bytes())
+        if banner:
+            print(banner, flush=True)
 
     @staticmethod
     def _last_snapshot(job: Job, terminal: GenerationTerminal):

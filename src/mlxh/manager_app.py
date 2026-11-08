@@ -445,7 +445,8 @@ def main():
     for arg, key in (("max-queued", "max_queued"), ("max-tokens-cap", "max_tokens_cap"),
                      ("memory-limit-gb", "memory_limit_gb"), ("cache-limit-gb", "cache_limit_gb"),
                      ("gen-timeout-s", "gen_timeout_s"), ("max-prompt-tokens", "max_prompt_tokens"),
-                     ("prompt-cache", "prompt_cache"), ("thinking", "thinking"),
+                     ("prompt-cache", "prompt_cache"), ("prompt-cache-gb", "prompt_cache_gb"),
+                     ("thinking", "thinking"),
                      ("max-image-pixels", "max_image_pixels"), ("image-steps", "image_steps")):
         parser.add_argument("--" + arg, default=None)
     args = parser.parse_args()

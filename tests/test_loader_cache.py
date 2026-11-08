@@ -55,6 +55,7 @@ class Resp:
         self.token = token
         self.text = chr(97 + token % 26)
         self.prompt_tokens = prompt_tokens
+        self.prompt_tps = 100.0
         self.generation_tokens = 1
         self.finish_reason = finish_reason
 
@@ -111,13 +112,14 @@ def test_follow_up_turn_only_processes_new_tokens(runner):
 def test_exact_hit_steps_back_one_token_instead_of_empty_prompt(runner):
     run(runner, [1, 2, 3, 4])
     run(runner, [1, 2, 3, 4, 100, 101])  # identical to a stored key
-    assert fake_stream_generate.calls[-1] == [101]
+    # mlx-lm's trim leaves one token for the model; plus the excluded last one.
+    assert fake_stream_generate.calls[-1] == [100, 101]
 
 
 def test_shorter_prompt_trims_a_longer_cached_entry(runner):
     run(runner, [1, 2, 3, 4, 5, 6, 7, 8])
     run(runner, [1, 2, 3, 4, 9])  # shares a 4-token prefix with the stored entry
-    assert fake_stream_generate.calls[-1] == [9]
+    assert fake_stream_generate.calls[-1] == [4, 9]
 
 
 def test_non_trimmable_cache_only_reuses_exact_stored_prefixes(monkeypatch):
@@ -131,7 +133,8 @@ def test_non_trimmable_cache_only_reuses_exact_stored_prefixes(monkeypatch):
     # Divergent suffix: cannot trim, so the whole prompt is reprocessed.
     run(r, [1, 2, 3, 9])
     assert fake_stream_generate.calls[-1] == [1, 2, 3, 9]
-    # Exact hit on a non-trimmable cache cannot step back: full reprocess.
+    # Exact repeat: the stored entry covers one token more than the lookup
+    # (tokens[:-1]) and cannot be trimmed, so the prompt is reprocessed.
     run(r, [1, 2, 3, 4, 100, 101])
     assert fake_stream_generate.calls[-1] == [1, 2, 3, 4, 100, 101]
     # A stored entry that is a strict prefix is still reused.
@@ -155,6 +158,34 @@ def test_cancelled_generation_still_stores_generated_prefix(runner):
     assert runner.cache_stats()["entries"] == 1
     run(runner, [1, 2, 3, 100, 7])
     assert fake_stream_generate.calls[-1] == [7]
+
+
+def test_failed_generation_does_not_store_a_half_updated_cache(runner, monkeypatch):
+    def exploding(model, tokenizer, prompt, max_tokens=1, **kwargs):
+        for layer in kwargs["prompt_cache"]:
+            layer.offset += len(prompt) + 1
+        yield Resp(100, len(prompt))
+        raise RuntimeError("metal oom")
+
+    monkeypatch.setattr(mlx_lm, "stream_generate", exploding)
+    with pytest.raises(RuntimeError):
+        run(runner, [1, 2, 3])
+    assert runner.cache_stats()["entries"] == 0
+
+
+def test_hit_scales_prompt_tps_to_the_full_prompt(runner):
+    run(runner, [1, 2, 3, 4])
+    out = run(runner, [1, 2, 3, 4, 100, 101, 5, 6])
+    assert out[0].prompt_tokens == 8 and out[0].cached_tokens == 6
+    assert out[0].prompt_tps == pytest.approx(100.0 * 8 / 2)
+
+
+def test_copied_cache_counts_against_the_byte_cap(runner):
+    runner.enable_cache(max_bytes=8 * 1000 * 2, max_entries=4)
+    run(runner, [1, 2, 3, 4])          # 6 tokens stored (12k bytes)
+    run(runner, [1, 2, 3, 4, 100, 7])  # copies 5 tokens -> stored must drop to <= 6k
+    stats = runner.cache_stats()
+    assert stats["bytes"] <= stats["max_bytes"]
 
 
 def test_stored_entry_is_not_mutated_by_later_generations(runner):

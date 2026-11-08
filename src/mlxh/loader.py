@@ -29,10 +29,15 @@ class VLMRunner:
         self.model, self.processor, self.config = model, processor, config
         self.apc = None
 
-    def enable_cache(self, num_blocks=4096, block_size=16):
-        """Automatic prefix caching: reuse KV blocks across requests."""
+    def enable_cache(self, max_bytes=None, num_blocks=4096, block_size=16):
+        """Automatic prefix caching: reuse KV blocks across requests.
+
+        The block pool is sized in blocks, not bytes; max_bytes is accepted
+        so every runner shares one enable_cache(max_bytes) contract.
+        """
         from mlx_vlm.apc import APCManager
         self.apc = APCManager(num_blocks=num_blocks, block_size=block_size)
+        return f"[apc] prompt cache enabled ({num_blocks * block_size // 1000}k-token block pool)"
 
     def template(self, messages, num_images=0, tools=None, thinking=None):
         from mlx_vlm.prompt_utils import apply_chat_template
@@ -85,6 +90,7 @@ class TextRunner:
         from mlx_lm.models.cache import LRUPromptCache
         self.prompt_cache = LRUPromptCache(max_size=max_entries, max_bytes=int(max_bytes))
         self._cache_key = "model"  # trie key; nn.Module itself is not hashable
+        return f"[cache] prefix cache enabled (cap {max_bytes / 1e9:.1f} GB, prompt_cache_gb overrides)"
 
     def cache_stats(self):
         if self.prompt_cache is None:
@@ -99,23 +105,22 @@ class TextRunner:
         }
 
     def _fetch_cache(self, tokens):
-        """Return (cache, tokens_to_process, cached_count) for this prompt."""
-        from mlx_lm.models.cache import (
-            can_trim_prompt_cache, make_prompt_cache, trim_prompt_cache,
-        )
-        cache, rest = self.prompt_cache.fetch_nearest_cache(self._cache_key, tokens)
-        if cache is not None and not rest:
-            # Exact hit: the model still needs to see at least one token to
-            # produce logits, so step back by one when the cache allows it.
-            if can_trim_prompt_cache(cache):
-                trim_prompt_cache(cache, 1)
-                rest = tokens[-1:]
-            else:
-                cache, rest = None, tokens
+        """Return (cache, tokens_to_process, cached_count) for this prompt.
+
+        The lookup excludes the last token: the model must see at least one
+        token to produce logits, so an exact hit on the full prompt would be
+        useless (mlx_lm raises on an empty prompt). Searching tokens[:-1]
+        makes trimmable and non-trimmable caches behave the same way.
+        """
+        from mlx_lm.models.cache import make_prompt_cache
+        cache, rest = self.prompt_cache.fetch_nearest_cache(self._cache_key, tokens[:-1])
         if cache is None:
-            cache = make_prompt_cache(self.model)
-            rest = tokens
-        return cache, list(rest), len(tokens) - len(rest)
+            return make_prompt_cache(self.model), list(tokens), 0
+        copied = sum(int(c.nbytes) for c in cache)
+        # The copy lives outside the LRU: keep stored + in-flight under the cap.
+        self.prompt_cache.trim_to(n_bytes=max(0, self.prompt_cache.max_bytes - copied))
+        rest = list(rest) + tokens[-1:]
+        return cache, rest, len(tokens) - len(rest)
 
     def template(self, messages, num_images=0, tools=None, thinking=None):
         kwargs = {"tools": tools} if tools else {}
@@ -138,31 +143,41 @@ class TextRunner:
         if logits_processors:
             kwargs["logits_processors"] = logits_processors
 
-        cache = None
-        cached = 0
-        tokens = list(prompt) if not isinstance(prompt, str) else None
-        if self.prompt_cache is not None and tokens is not None:
+        cache, key, cached = None, None, 0
+        if self.prompt_cache is not None and not isinstance(prompt, str):
+            tokens = list(prompt)
             cache, prompt, cached = self._fetch_cache(tokens)
             kwargs["prompt_cache"] = cache
+            key = list(tokens)
             if cached:
                 self.cache_hits += 1
                 self.cached_tokens_total += cached
             else:
                 self.cache_misses += 1
-        key = list(tokens) if tokens is not None else None
+        processed = len(prompt)
+        completed = False
         try:
             for response in stream_generate(
                 self.model, self.tokenizer, prompt, max_tokens=max_tokens, **kwargs
             ):
                 response.cached_tokens = cached
-                # Report the full prompt, not just the uncached suffix.
-                response.prompt_tokens = (response.prompt_tokens or 0) + cached
+                if cached:
+                    # Report the full prompt and keep prompt_tps consistent
+                    # with it (mlx-lm measured only the uncached suffix).
+                    response.prompt_tokens = processed + cached
+                    response.prompt_tps = (getattr(response, "prompt_tps", 0.0) or 0.0) * (
+                        (processed + cached) / max(processed, 1))
                 if key is not None:
                     key.append(response.token)
                 yield response
+            completed = True
+        except GeneratorExit:
+            # Cancelled by the caller: every yielded token is in the cache.
+            completed = True
+            raise
         finally:
-            if cache is not None and key is not None and len(key) > len(tokens):
-                # Also saved on cancel/error: the generated prefix is valid.
+            # Not stored after an error: the cache may be half-updated.
+            if completed and key is not None and len(key) > processed + cached:
                 self.prompt_cache.insert_cache(self._cache_key, key, cache)
 
     def decode_token(self, token_id: int) -> str:
