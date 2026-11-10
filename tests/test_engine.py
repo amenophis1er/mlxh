@@ -130,7 +130,7 @@ def test_prompt_cache_cap_follows_setting_then_memory_limit(monkeypatch):
     assert disabled._prompt_cache_bytes() == int(64 * 10**9 * 0.2)
 
 
-def test_every_runner_shares_the_enable_cache_contract(monkeypatch):
+def test_every_runner_shares_the_enable_cache_contract():
     seen = []
     engine = InferenceEngine("/unused", "m", {**SETTINGS, "prompt_cache_gb": 1})
     engine.runner = NS(enable_cache=lambda max_bytes: seen.append(max_bytes) or "on")

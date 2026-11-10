@@ -112,14 +112,21 @@ def test_follow_up_turn_only_processes_new_tokens(runner):
 def test_exact_hit_steps_back_one_token_instead_of_empty_prompt(runner):
     run(runner, [1, 2, 3, 4])
     run(runner, [1, 2, 3, 4, 100, 101])  # identical to a stored key
-    # mlx-lm's trim leaves one token for the model; plus the excluded last one.
-    assert fake_stream_generate.calls[-1] == [100, 101]
+    assert fake_stream_generate.calls[-1] == [101]
 
 
 def test_shorter_prompt_trims_a_longer_cached_entry(runner):
     run(runner, [1, 2, 3, 4, 5, 6, 7, 8])
     run(runner, [1, 2, 3, 4, 9])  # shares a 4-token prefix with the stored entry
-    assert fake_stream_generate.calls[-1] == [4, 9]
+    assert fake_stream_generate.calls[-1] == [9]
+
+
+def test_one_token_prompt_against_longer_entry_is_a_plain_miss(runner):
+    run(runner, [1, 2, 3, 4])
+    out = run(runner, [1])  # nothing can stay cached: discard the copy
+    assert fake_stream_generate.calls[-1] == [1]
+    assert out[0].cached_tokens == 0
+    assert runner.cache_stats()["misses"] == 2
 
 
 def test_non_trimmable_cache_only_reuses_exact_stored_prefixes(monkeypatch):
@@ -133,8 +140,7 @@ def test_non_trimmable_cache_only_reuses_exact_stored_prefixes(monkeypatch):
     # Divergent suffix: cannot trim, so the whole prompt is reprocessed.
     run(r, [1, 2, 3, 9])
     assert fake_stream_generate.calls[-1] == [1, 2, 3, 9]
-    # Exact repeat: the stored entry covers one token more than the lookup
-    # (tokens[:-1]) and cannot be trimmed, so the prompt is reprocessed.
+    # Exact repeat on a non-trimmable cache cannot step back: reprocess.
     run(r, [1, 2, 3, 4, 100, 101])
     assert fake_stream_generate.calls[-1] == [1, 2, 3, 4, 100, 101]
     # A stored entry that is a strict prefix is still reused.
@@ -173,19 +179,43 @@ def test_failed_generation_does_not_store_a_half_updated_cache(runner, monkeypat
     assert runner.cache_stats()["entries"] == 0
 
 
-def test_hit_scales_prompt_tps_to_the_full_prompt(runner):
+def test_hit_reports_full_prompt_but_measured_tps(runner):
     run(runner, [1, 2, 3, 4])
     out = run(runner, [1, 2, 3, 4, 100, 101, 5, 6])
     assert out[0].prompt_tokens == 8 and out[0].cached_tokens == 6
-    assert out[0].prompt_tps == pytest.approx(100.0 * 8 / 2)
+    assert out[0].prompt_tps == 100.0
 
 
-def test_copied_cache_counts_against_the_byte_cap(runner):
+def test_failed_hit_evicts_nothing(runner, monkeypatch):
+    run(runner, [1, 2, 3, 4])
+    run(runner, [11, 12, 13, 14])
+    before = runner.cache_stats()["entries"]
+
+    def exploding(model, tokenizer, prompt, max_tokens=1, **kwargs):
+        raise RuntimeError("metal oom")
+        yield  # noqa: unreachable, makes this a generator
+
+    monkeypatch.setattr(mlx_lm, "stream_generate", exploding)
+    with pytest.raises(RuntimeError):
+        run(runner, [1, 2, 3, 4, 100, 7])
+    assert runner.cache_stats()["entries"] == before
+
+
+def test_stored_bytes_stay_under_the_cap_after_a_hit(runner):
     runner.enable_cache(max_bytes=8 * 1000 * 2, max_entries=4)
-    run(runner, [1, 2, 3, 4])          # 6 tokens stored (12k bytes)
-    run(runner, [1, 2, 3, 4, 100, 7])  # copies 5 tokens -> stored must drop to <= 6k
+    run(runner, [1, 2, 3, 4])          # 6 tokens stored
+    run(runner, [1, 2, 3, 4, 100, 7])  # superseding entry replaces its prefix
     stats = runner.cache_stats()
     assert stats["bytes"] <= stats["max_bytes"]
+    assert stats["entries"] == 1
+
+
+def test_cancel_with_unsound_cache_stores_nothing(runner, monkeypatch):
+    monkeypatch.setattr(TextRunner, "_cache_is_sound", staticmethod(lambda cache: False))
+    gen = runner.stream([1, 2, 3], max_tokens=5)
+    next(gen)
+    gen.close()
+    assert runner.cache_stats()["entries"] == 0
 
 
 def test_stored_entry_is_not_mutated_by_later_generations(runner):

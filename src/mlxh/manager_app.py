@@ -448,7 +448,8 @@ def main():
                      ("prompt-cache", "prompt_cache"), ("prompt-cache-gb", "prompt_cache_gb"),
                      ("thinking", "thinking"),
                      ("max-image-pixels", "max_image_pixels"), ("image-steps", "image_steps")):
-        parser.add_argument("--" + arg, default=None)
+        parser.add_argument("--" + arg, default=None,
+                            type=float if arg.endswith("-gb") else None)
     args = parser.parse_args()
     if args.worker_idle_timeout_s is not None:
         import math

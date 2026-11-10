@@ -32,12 +32,13 @@ class VLMRunner:
     def enable_cache(self, max_bytes=None, num_blocks=4096, block_size=16):
         """Automatic prefix caching: reuse KV blocks across requests.
 
-        The block pool is sized in blocks, not bytes; max_bytes is accepted
-        so every runner shares one enable_cache(max_bytes) contract.
+        mlx-vlm sizes its pool in blocks, not bytes, so prompt_cache_gb does
+        not apply here; the banner says so instead of silently ignoring it.
         """
         from mlx_vlm.apc import APCManager
         self.apc = APCManager(num_blocks=num_blocks, block_size=block_size)
-        return f"[apc] prompt cache enabled ({num_blocks * block_size // 1000}k-token block pool)"
+        return (f"[apc] prompt cache enabled ({num_blocks * block_size // 1000}k-token "
+                "block pool; prompt_cache_gb does not apply to mlx-vlm models)")
 
     def template(self, messages, num_images=0, tools=None, thinking=None):
         from mlx_vlm.prompt_utils import apply_chat_template
@@ -107,20 +108,22 @@ class TextRunner:
     def _fetch_cache(self, tokens):
         """Return (cache, tokens_to_process, cached_count) for this prompt.
 
-        The lookup excludes the last token: the model must see at least one
-        token to produce logits, so an exact hit on the full prompt would be
-        useless (mlx_lm raises on an empty prompt). Searching tokens[:-1]
-        makes trimmable and non-trimmable caches behave the same way.
+        The model must see at least one token to produce logits (mlx_lm
+        raises on an empty prompt), so an exact hit steps back one token when
+        the cache can be trimmed. A copy that would leave nothing cached is
+        discarded rather than charged against the cap.
         """
-        from mlx_lm.models.cache import make_prompt_cache
-        cache, rest = self.prompt_cache.fetch_nearest_cache(self._cache_key, tokens[:-1])
-        if cache is None:
+        from mlx_lm.models.cache import (
+            can_trim_prompt_cache, make_prompt_cache, trim_prompt_cache,
+        )
+        cache, rest = self.prompt_cache.fetch_nearest_cache(self._cache_key, tokens)
+        if cache is not None and not rest and can_trim_prompt_cache(cache):
+            trim_prompt_cache(cache, 1)
+            rest = tokens[-1:]
+        cached = len(tokens) - len(rest)
+        if cache is None or cached <= 0 or not rest:
             return make_prompt_cache(self.model), list(tokens), 0
-        copied = sum(int(c.nbytes) for c in cache)
-        # The copy lives outside the LRU: keep stored + in-flight under the cap.
-        self.prompt_cache.trim_to(n_bytes=max(0, self.prompt_cache.max_bytes - copied))
-        rest = list(rest) + tokens[-1:]
-        return cache, rest, len(tokens) - len(rest)
+        return cache, list(rest), cached
 
     def template(self, messages, num_images=0, tools=None, thinking=None):
         kwargs = {"tools": tools} if tools else {}
@@ -161,24 +164,32 @@ class TextRunner:
                 self.model, self.tokenizer, prompt, max_tokens=max_tokens, **kwargs
             ):
                 response.cached_tokens = cached
-                if cached:
-                    # Report the full prompt and keep prompt_tps consistent
-                    # with it (mlx-lm measured only the uncached suffix).
-                    response.prompt_tokens = processed + cached
-                    response.prompt_tps = (getattr(response, "prompt_tps", 0.0) or 0.0) * (
-                        (processed + cached) / max(processed, 1))
+                # Usage counts the full prompt; prompt_tps stays what mlx-lm
+                # measured over the tokens it actually processed.
+                response.prompt_tokens = processed + cached
                 if key is not None:
                     key.append(response.token)
                 yield response
             completed = True
         except GeneratorExit:
-            # Cancelled by the caller: every yielded token is in the cache.
-            completed = True
+            # Cancelled by the caller. The last step was scheduled lazily;
+            # force it now so a failure surfaces here, not in a later request.
+            completed = self._cache_is_sound(cache)
             raise
         finally:
-            # Not stored after an error: the cache may be half-updated.
+            # The LRU enforces the byte cap on insert (superseded prefixes are
+            # dropped first), so a failed request never evicts anything.
             if completed and key is not None and len(key) > processed + cached:
                 self.prompt_cache.insert_cache(self._cache_key, key, cache)
+
+    @staticmethod
+    def _cache_is_sound(cache):
+        try:
+            import mlx.core as mx
+            mx.eval([c.state for c in cache])
+            return True
+        except Exception:
+            return False
 
     def decode_token(self, token_id: int) -> str:
         return self.tokenizer.decode([token_id])

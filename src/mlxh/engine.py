@@ -140,6 +140,7 @@ class EngineLifecycle:
         self.settings = settings
         self.exit_on_load_failure = exit_on_load_failure
         self.runner = None
+        self.memory_limit_bytes = self._resolve_memory_limit()
         self.jobs: queue.Queue[Job] = queue.Queue()
         self.ready = threading.Event()
         self.failed: BaseException | None = None
@@ -224,12 +225,11 @@ class EngineLifecycle:
         return None
 
     def _configure_memory(self, mx):
-        self.memory_limit_bytes = self._resolve_memory_limit()
         if self.memory_limit_bytes is not None:
             mx.set_memory_limit(self.memory_limit_bytes)
             note = ("" if self.settings["memory_limit_gb"] > 0
                     else " (auto 80% of RAM; memory_limit_gb overrides, -1 disables)")
-            print(f"[mlx] memory limit {self.memory_limit_bytes / 1e9:.0f} GB{note}", flush=True)
+            print(f"[mlx] memory limit {self.memory_limit_bytes / 1e9:g} GB{note}", flush=True)
         if self.settings["cache_limit_gb"] > 0:
             mx.set_cache_limit(int(self.settings["cache_limit_gb"] * 1e9))
 
@@ -353,11 +353,8 @@ class InferenceEngine(EngineLifecycle):
         configured = float(self.settings.get("prompt_cache_gb", 0) or 0)
         if configured > 0:
             return int(configured * 1e9)
-        limit = getattr(self, "memory_limit_bytes", None)
-        if limit is None:
-            limit = self._resolve_memory_limit()
-        if limit:
-            return int(limit * 0.25)
+        if self.memory_limit_bytes:
+            return int(self.memory_limit_bytes * 0.25)
         ram = total_ram_bytes()
         return int(ram * 0.2) if ram else 8 * 10**9
 
