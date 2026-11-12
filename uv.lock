@@ -1368,7 +1368,7 @@ wheels = [
 
 [[package]]
 name = "mlxh"
-version = "0.2.0"
+version = "0.2.1"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
@@ -1411,7 +1411,7 @@ requires-dist = [
     { name = "mlx-lm", specifier = "==0.31.3" },
     { name = "mlx-vlm", specifier = "==0.7.1" },
     { name = "numpy", specifier = ">=2.0" },
-    { name = "pillow", specifier = ">=10.0" },
+    { name = "pillow", specifier = ">=10.0,<13" },
     { name = "prompt-toolkit", specifier = ">=3.0,<4" },
     { name = "python-multipart", specifier = ">=0.0.20,<1" },
     { name = "rich", specifier = ">=13,<15" },

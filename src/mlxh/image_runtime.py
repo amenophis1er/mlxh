@@ -143,5 +143,8 @@ def install(home):
                     if environment.resolve() not in keep:
                         shutil.rmtree(environment)
             except Exception as exc:
-                # Keep failed staging/logs for diagnosis; never remove the active runtime.
+                # The log is what matters for diagnosis; a failed staging env is
+                # ~1.3 GB of nothing, so drop it. Never touch the active runtime.
+                if stage.resolve() != (previous or stage.resolve()):
+                    shutil.rmtree(stage, ignore_errors=True)
                 raise RuntimeError(f"image runtime installation failed; see {log_path}") from exc

@@ -2,14 +2,22 @@
 
 ## Unreleased
 
+## v0.2.1 — 2026-11-11
+
 - **Prefix cache for text-only models**: `TextRunner` (models loaded through
   mlx-lm, including Prism text packs) now reuses the KV cache across requests
   via mlx-lm's `LRUPromptCache`, so agent follow-up turns only process new
   tokens. Bounded by the new `prompt_cache_gb` setting (0 = auto: 25% of the
   memory limit) and 32 entries; `mlxh status` shows entries, size and hits.
+  Each response carries `cached_tokens` for the usage-reporting work in #5.
+- **Image runtime**: pin Pillow below 13.0, which fails to import on
+  Python 3.11 and broke `mlxh images install`; failed staging environments
+  (~1.3 GB each) are now removed instead of accumulating.
 - **Install/service fixes**: `install.sh` works under macOS bash 3.2 without
   `GITHUB_TOKEN`; `mlxh service restart` waits for launchd to drop the job;
-  the manager refuses unknown paths before loading a worker.
+  the manager refuses unknown paths before loading a worker and rejects
+  non-numeric `--*-gb` flags up front.
+- **CI**: the Apple Silicon job runs on macos-15 (macos-14 was retired).
 
 ## v0.2.0 — 2026-09-25
 

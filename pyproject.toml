@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mlxh"
-version = "0.2.0"
+version = "0.2.1"
 description = "Local MLX model harness for Apple Silicon: pull models from Hugging Face, chat with tools and images, serve an OpenAI-compatible API."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -27,7 +27,7 @@ dependencies = [
     "numpy>=2.0",
     "tokenizers>=0.21",
     "jinja2>=3.1",
-    "pillow>=10.0",
+    "pillow>=10.0,<13",  # 13.0 imports numbers._IntegralLike, absent on Python 3.11
     "prompt-toolkit>=3.0,<4",
     "wcwidth>=0.2.14,<0.3",
     "rich>=13,<15",

@@ -60,6 +60,8 @@ def test_staged_install_activates_only_after_validation(tmp_path, monkeypatch, f
         with pytest.raises(RuntimeError, match="install.log"):
             runtime.install(tmp_path)
         assert (root / "current").resolve() == old
+        staged = [p for p in root.glob("env-*") if p != stale]
+        assert staged == [], "a failed staging environment must not be left behind"
     else:
         runtime.install(tmp_path)
         assert any("Flux2KleinEdit" in str(arg) for call in calls for arg in call)
