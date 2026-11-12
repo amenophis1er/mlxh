@@ -3,8 +3,8 @@ import copy
 
 import pytest
 
-import mlx_lm
-from mlx_lm.models import cache as cache_mod
+mlx_lm = pytest.importorskip("mlx_lm", reason="prefix cache tests need mlx-lm (Apple Silicon)")
+cache_mod = pytest.importorskip("mlx_lm.models.cache")
 
 from mlxh import loader
 from mlxh.loader import TextRunner
