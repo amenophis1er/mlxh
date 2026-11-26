@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.2.2 — 2026-11-25
+
 - **Inkling 2 Mini** (`mlx-community/Inkling-2-Mini-4bit`): served from its own
   runtime, `mlxh inkling install` (offered on `mlxh pull`), with mlx-lm pinned
   to the reviewed commit of ml-explore/mlx-lm#2086. mlxh's own environment stays
