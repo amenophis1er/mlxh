@@ -8,6 +8,8 @@ objects / SSE events. Pure functions — no FastAPI, no model code.
 import json
 import uuid
 
+from . import reasoning
+
 
 def to_openai_body(body):
     """Anthropic /v1/messages request -> internal OpenAI-style request body."""
@@ -77,6 +79,9 @@ def to_openai_body(body):
     for key in ("temperature", "top_p"):
         if body.get(key) is not None:
             out[key] = body[key]
+    effort = reasoning.from_anthropic(body.get("thinking"))
+    if effort is not None:
+        out["reasoning_effort"] = effort
     return out
 
 

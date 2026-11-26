@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from . import anthropic_compat as anth
+from . import reasoning
 from . import responses_compat as oresp
 from .engine import (
     EngineError,
@@ -104,6 +105,13 @@ async def lifespan(_app):
 
 app = FastAPI(title="mlxh", lifespan=lifespan)
 app.add_middleware(PrivateBodyLimitMiddleware)
+
+
+@app.exception_handler(reasoning.ReasoningError)
+async def _reasoning_error(_request, exc):
+    return JSONResponse({"detail": str(exc)}, 400)
+
+
 engine = None
 MODEL_ID = "model"
 SETTINGS = {
@@ -272,12 +280,15 @@ def _request(body, source="openai"):
     thinking = (chat_template_kwargs.get("enable_thinking")
                 if isinstance(chat_template_kwargs.get("enable_thinking"), bool)
                 else None)
+    effort = reasoning.level(body.get("reasoning_effort"))
+    if effort is not None:
+        thinking = effort != "none"
     return GenerationRequest(
         messages=body.get("messages", []), source=source,
         max_tokens=body.get("max_tokens") or body.get("max_completion_tokens") or 1024,
         tools=body.get("tools") or None,
         temperature=body.get("temperature"), top_p=body.get("top_p"),
-        thinking=thinking, logprobs=logprobs,
+        thinking=thinking, reasoning_effort=effort, logprobs=logprobs,
     )
 
 

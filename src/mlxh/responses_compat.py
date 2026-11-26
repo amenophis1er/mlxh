@@ -10,6 +10,8 @@ import json
 import time
 import uuid
 
+from . import reasoning
+
 
 def _content_to_parts(content):
     if isinstance(content, str):
@@ -26,6 +28,14 @@ def _content_to_parts(content):
             if url:
                 parts.append({"type": "image_url", "image_url": {"url": url}})
     return parts
+
+
+def _effort(options):
+    if options is None:
+        return None
+    if not isinstance(options, dict):
+        raise reasoning.ReasoningError("reasoning must be an object")
+    return reasoning.level(options.get("effort"), "reasoning.effort")
 
 
 def to_openai_body(body):
@@ -80,6 +90,9 @@ def to_openai_body(body):
     for key in ("temperature", "top_p"):
         if body.get(key) is not None:
             out[key] = body[key]
+    effort = _effort(body.get("reasoning"))
+    if effort is not None:
+        out["reasoning_effort"] = effort
     return out
 
 

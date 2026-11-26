@@ -50,6 +50,7 @@ class GenerationRequest:
     temperature: float | None = None
     top_p: float | None = None
     thinking: bool | None = None
+    reasoning_effort: str | None = None  # reasoning.LEVELS; agrees with thinking
     logprobs: LogprobsOptions | None = None
 
 
@@ -446,7 +447,8 @@ class InferenceEngine(EngineLifecycle):
         if thinking is None:
             thinking = {"on": True, "off": False}.get(self.settings["thinking"])
         prompt = self.runner.template(
-            messages, num_images=len(images), tools=request.tools, thinking=thinking
+            messages, num_images=len(images), tools=request.tools, thinking=thinking,
+            effort=request.reasoning_effort,
         )
         own_parser = getattr(self.runner, "output_parser", None)
         reasoning_parser = own_parser() if own_parser else ReasoningParser(
@@ -465,7 +467,9 @@ class InferenceEngine(EngineLifecycle):
                     "(or serve --max-prompt-tokens N).",
                 )
         print(f"[gen] start: {len(messages)} msgs, {len(images)} images, "
-              f"{len(request.tools or [])} tools, max_tokens={max_tokens}", flush=True)
+              f"{len(request.tools or [])} tools, max_tokens={max_tokens}"
+              + (f", effort={request.reasoning_effort}" if request.reasoning_effort else ""),
+              flush=True)
         started = time.perf_counter()
         last = None
         captured, processors = [], None

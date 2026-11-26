@@ -46,7 +46,8 @@ Models whose chat template pre-opens a reasoning block (e.g. Bonsai) have the
 ### POST /v1/chat/completions
 
 Request fields honored: `messages`, `tools`, `max_tokens` (or
-`max_completion_tokens`), `temperature`, `top_p`, `stream`. In manager mode,
+`max_completion_tokens`), `temperature`, `top_p`, `stream`,
+`reasoning_effort` (see [Reasoning effort](#reasoning-effort)). In manager mode,
 `model` must name an installed model (`GET /v1/models` lists available names).
 In fixed-model mode the server serves the model it was started with and
 ignores the request's `model` field.
@@ -143,7 +144,8 @@ The OpenAI Responses API subset Codex needs. Honored: `instructions`,
 `input` (string, or items: `message` with `input_text`/`input_image`/
 `output_text` content, `function_call`, `function_call_output`), flat
 `tools` (function type), `max_output_tokens`, `temperature`, `top_p`,
-`stream`. Reasoning items are skipped.
+`stream`, `reasoning.effort` (same values as `reasoning_effort`).
+Reasoning items are skipped.
 
 Output items are `message` (with `output_text` content) and
 `function_call`. Streaming follows the Responses event protocol:
@@ -153,6 +155,25 @@ Output items are `message` (with `output_text` content) and
 `response.completed` — with `: ping` comment keepalives during prompt
 processing, and `response.failed` on errors.
 
+### Reasoning effort
+
+`reasoning_effort` (chat completions) and `reasoning.effort` (Responses)
+take `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`; anything
+else is a **400**. Anthropic `thinking` maps onto the same levels:
+
+| `thinking` | Level |
+|---|---|
+| `{"type": "disabled"}` | `none` |
+| `{"type": "enabled", "budget_tokens": N}`, N < 4096 | `low` |
+| same, 4096 ≤ N < 16384 | `medium` |
+| same, N ≥ 16384 | `high` |
+| `{"type": "adaptive"}` or absent | the server's `thinking` setting |
+
+Inkling 2 receives the level as its template's `reasoning_effort`. Other
+models only switch reasoning: `none` turns it off, any other level on. A
+level in the request wins over `chat_template_kwargs.enable_thinking` and
+over the server's `thinking` setting.
+
 ## Anthropic dialect
 
 ### POST /v1/messages
@@ -160,7 +181,8 @@ processing, and `response.failed` on errors.
 Request fields honored: `system` (string or text blocks), `messages` with
 content blocks (`text`, `image` base64 source, `tool_use`, `tool_result`),
 `tools` (`name`/`description`/`input_schema`), `max_tokens`, `temperature`,
-`top_p`, `stream`. System-role messages appearing mid-conversation (agent
+`top_p`, `stream`, `thinking` (see [Reasoning effort](#reasoning-effort)).
+System-role messages appearing mid-conversation (agent
 "system reminders") are demoted to user messages rather than rejected.
 
 Responses are Anthropic message objects: `content` blocks (`text`,

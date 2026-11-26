@@ -42,7 +42,7 @@ class VLMRunner:
         return (f"[apc] prompt cache enabled ({num_blocks * block_size // 1000}k-token "
                 "block pool; prompt_cache_gb does not apply to mlx-vlm models)")
 
-    def template(self, messages, num_images=0, tools=None, thinking=None):
+    def template(self, messages, num_images=0, tools=None, thinking=None, effort=None):
         from mlx_vlm.prompt_utils import apply_chat_template
         kwargs = {"tools": tools} if tools else {}
         if thinking is not None:
@@ -129,7 +129,7 @@ class TextRunner:
             return make_prompt_cache(self.model), list(tokens), 0
         return cache, list(rest), cached
 
-    def template(self, messages, num_images=0, tools=None, thinking=None):
+    def template(self, messages, num_images=0, tools=None, thinking=None, effort=None):
         kwargs = {"tools": tools} if tools else {}
         if thinking is not None:
             kwargs["enable_thinking"] = thinking
@@ -269,10 +269,12 @@ class TextRunner:
 class InklingRunner(TextRunner):
     """Inkling 2 (mlx-lm's inkling2 model): its own effort setting and message format."""
 
-    def template(self, messages, num_images=0, tools=None, thinking=None):
+    def template(self, messages, num_images=0, tools=None, thinking=None, effort=None):
         kwargs = {"tools": tools} if tools else {}
-        if thinking is False:
-            kwargs["reasoning_effort"] = "none"
+        if effort is None and thinking is False:
+            effort = "none"
+        if effort is not None:
+            kwargs["reasoning_effort"] = effort
         return self.tokenizer.apply_chat_template(
             messages, tokenize=True, add_generation_prompt=True, **kwargs
         )

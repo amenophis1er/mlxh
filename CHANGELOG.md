@@ -17,6 +17,13 @@
   `cache_read_input_tokens` on Anthropic messages (whose `input_tokens` now
   leaves them out, as Anthropic's does; `cache_creation_input_tokens` is
   always 0). `mlxh status` shows each resident worker's prompt cache.
+- **Reasoning effort per request**: chat completions `reasoning_effort`,
+  Responses `reasoning.effort` (`none` … `high`, plus `xhigh`/`max`) and
+  Anthropic `thinking` (`disabled`, or `enabled` with `budget_tokens`: under
+  4096 is `low`, under 16384 `medium`, else `high`). Inkling 2 gets the level
+  in its template; other models switch thinking off for `none` and on
+  otherwise. The request wins over `enable_thinking` and the `thinking`
+  setting; unknown values are a 400.
 
 ## v0.2.2 — 2026-11-25
 

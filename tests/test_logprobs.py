@@ -154,7 +154,7 @@ def test_enable_thinking_request_override(monkeypatch):
     seen = {}
 
     class Runner:
-        def template(self, messages, num_images, tools, thinking):
+        def template(self, messages, num_images, tools, thinking, effort=None):
             seen["thinking"] = thinking
             return "prompt"
 
