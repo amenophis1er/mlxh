@@ -110,9 +110,10 @@ def response_object(resp_id, model_id, output, usage, status="completed"):
     }
 
 
-def usage_of(prompt_tokens, output_tokens):
+def usage_of(prompt_tokens, output_tokens, cached_tokens=0):
     return {"input_tokens": prompt_tokens, "output_tokens": output_tokens,
-            "total_tokens": prompt_tokens + output_tokens}
+            "total_tokens": prompt_tokens + output_tokens,
+            "input_tokens_details": {"cached_tokens": cached_tokens}}
 
 
 def sse_event(kind, data):

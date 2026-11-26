@@ -39,10 +39,17 @@ class FakeLinear(FakeKV):
 
 
 class Model:
-    """Hashable stand-in; the trie keys entries by model."""
+    """Hashable stand-in; the trie keys entries by model. A forward pass (the
+    snapshot prefill) adds its tokens to every layer, as stream_generate does."""
 
     def __init__(self, trimmable=True):
         self.trimmable = trimmable
+        self.calls = []
+
+    def __call__(self, inputs, cache):
+        self.calls.append(inputs.tolist()[0])
+        for layer in cache:
+            layer.offset += inputs.shape[1]
 
 
 class Tokenizer:
@@ -129,23 +136,133 @@ def test_one_token_prompt_against_longer_entry_is_a_plain_miss(runner):
     assert runner.cache_stats()["misses"] == 2
 
 
-def test_non_trimmable_cache_only_reuses_exact_stored_prefixes(monkeypatch):
+@pytest.fixture
+def linear(monkeypatch):
+    """A runner whose cache cannot be trimmed (Inkling, Qwen 3.5 hybrids)."""
     fake_stream_generate.calls = []
     monkeypatch.setattr(mlx_lm, "stream_generate", fake_stream_generate)
     monkeypatch.setattr(cache_mod, "make_prompt_cache",
                         lambda model: [FakeLinear(), FakeKV()])
     r = TextRunner(Model(trimmable=False), Tokenizer())
     r.enable_cache(max_bytes=10**9)
-    run(r, [1, 2, 3, 4])
-    # Divergent suffix: cannot trim, so the whole prompt is reprocessed.
-    run(r, [1, 2, 3, 9])
-    assert fake_stream_generate.calls[-1] == [1, 2, 3, 9]
-    # Exact repeat on a non-trimmable cache cannot step back: reprocess.
-    run(r, [1, 2, 3, 4, 100, 101])
-    assert fake_stream_generate.calls[-1] == [1, 2, 3, 4, 100, 101]
-    # A stored entry that is a strict prefix is still reused.
-    run(r, [1, 2, 3, 4, 100, 101, 7])
+    return r
+
+
+def stored_keys(runner):
+    return sorted(tokens for queue in runner.prompt_cache._lru._lrus.values()
+                  for _, tokens in queue)
+
+
+def test_non_trimmable_cache_keeps_a_snapshot_at_the_end_of_the_prompt(linear):
+    run(linear, [1, 2, 3, 4])
+    # The model prefilled all but the last token, mlx-lm processed that one.
+    assert linear.model.calls == [[1, 2, 3]]
+    assert fake_stream_generate.calls == [[4]]
+    assert stored_keys(linear) == [[1, 2, 3], [1, 2, 3, 4, 100, 101]]
+
+
+def test_non_trimmable_next_turn_reuses_the_prompt_when_the_reply_is_rerendered(linear):
+    run(linear, [1, 2, 3, 4])                  # replies 100, 101 (with reasoning)
+    # The history comes back without the reasoning: 50, 51 instead of 100, 101.
+    out = run(linear, [1, 2, 3, 4, 50, 51, 5, 6])
+    assert out[0].cached_tokens == 3
+    assert linear.model.calls[-1] == [4, 50, 51, 5]
+    assert fake_stream_generate.calls[-1] == [6]
+    out = run(linear, [1, 2, 3, 4, 50, 51, 5, 6, 52, 7, 8])
+    assert out[0].cached_tokens == 7
+    assert fake_stream_generate.calls[-1] == [8]
+    # Earlier snapshots and the replies the history dropped are not kept.
+    assert stored_keys(linear) == [[1, 2, 3, 4, 50, 51, 5, 6, 52, 7],
+                                   [1, 2, 3, 4, 50, 51, 5, 6, 52, 7, 8, 100, 101]]
+    stats = linear.cache_stats()
+    assert stats["entries"] == 2
+    assert stats["bytes"] == 2 * 1000 * (10 + 13)
+
+
+def test_non_trimmable_reply_echoed_exactly_is_still_reused(linear):
+    run(linear, [1, 2, 3, 4])
+    out = run(linear, [1, 2, 3, 4, 100, 101, 7])
+    assert out[0].cached_tokens == 6
     assert fake_stream_generate.calls[-1] == [7]
+
+
+def test_non_trimmable_divergent_or_repeated_prompt_reuses_the_snapshot(linear):
+    run(linear, [1, 2, 3, 4])
+    run(linear, [1, 2, 3, 9])                 # differs only in the last token
+    assert fake_stream_generate.calls[-1] == [9]
+    assert linear.model.calls[-1] == [1, 2, 3]
+    run(linear, [1, 2, 3, 9])                 # exact repeat: one token, no new snapshot
+    assert fake_stream_generate.calls[-1] == [9]
+    assert len(linear.model.calls) == 1
+
+
+def test_non_trimmable_other_conversations_are_not_dropped(linear):
+    run(linear, [1, 2, 3, 4])
+    run(linear, [7, 8, 9])
+    run(linear, [1, 2, 3, 4, 50, 5])
+    assert [7, 8] in stored_keys(linear)
+    assert [7, 8, 9, 100, 101] in stored_keys(linear)
+    out = run(linear, [7, 8, 9, 50, 6])
+    assert out[0].cached_tokens == 2
+
+
+def test_non_trimmable_failed_or_unsound_requests_store_no_snapshot(linear, monkeypatch):
+    def exploding(model, tokenizer, prompt, max_tokens=1, **kwargs):
+        yield Resp(100, len(prompt))
+        raise RuntimeError("metal oom")
+
+    monkeypatch.setattr(mlx_lm, "stream_generate", exploding)
+    with pytest.raises(RuntimeError):
+        run(linear, [1, 2, 3])
+    assert linear.cache_stats()["entries"] == 0
+
+    monkeypatch.setattr(mlx_lm, "stream_generate", fake_stream_generate)
+    monkeypatch.setattr(TextRunner, "_cache_is_sound", staticmethod(lambda cache: False))
+    gen = linear.stream([1, 2, 3], max_tokens=5)
+    next(gen)
+    gen.close()
+    assert linear.cache_stats()["entries"] == 0
+
+
+def test_non_trimmable_failed_prefill_keeps_earlier_entries(linear, monkeypatch):
+    run(linear, [1, 2, 3, 4])
+
+    def failing(self, cache, tokens, step=2048):
+        raise RuntimeError("metal oom")
+
+    monkeypatch.setattr(TextRunner, "_prefill_snapshot", failing)
+    with pytest.raises(RuntimeError):
+        run(linear, [1, 2, 3, 4, 50, 5])
+    assert stored_keys(linear) == [[1, 2, 3], [1, 2, 3, 4, 100, 101]]
+
+
+def test_non_trimmable_cancel_with_sound_cache_keeps_the_snapshot(linear):
+    gen = linear.stream([1, 2, 3], max_tokens=5)
+    next(gen)
+    gen.close()
+    assert [1, 2] in stored_keys(linear)
+
+
+def test_snapshot_prefill_uses_generate_steps_chunks(linear):
+    cache = cache_mod.make_prompt_cache(linear.model)
+    snapshot = linear._prefill_snapshot(cache, [1, 2, 3, 4, 5], step=2)
+    assert linear.model.calls == [[1, 2], [3, 4], [5]]
+    assert [layer.offset for layer in snapshot] == [5, 5]
+    cache[0].offset += 1  # generation goes on in the live cache...
+    assert snapshot[0].offset == 5  # ...not in the copy
+
+
+def test_snapshot_reports_prompt_speed_over_every_processed_token(linear, monkeypatch):
+    times = iter([0.0, 2.0])
+    monkeypatch.setattr("mlxh.loader.time.perf_counter", lambda: next(times))
+    out = run(linear, [1, 2, 3, 4, 5])  # 4 tokens prefilled in 2 s, 1 by mlx-lm at 100/s
+    assert out[0].prompt_tps == pytest.approx(5 / 2.01)
+
+
+def test_trimmable_cache_takes_no_snapshot(runner):
+    run(runner, [1, 2, 3, 4])
+    assert runner.model.calls == []
+    assert fake_stream_generate.calls == [[1, 2, 3, 4]]
 
 
 def test_cache_is_bounded_by_bytes_and_entries(runner):

@@ -118,6 +118,37 @@ def test_public_timeout_is_not_reported_as_normal_completion(monkeypatch):
     assert response["incomplete_details"] == {"reason": "max_output_tokens"}
 
 
+def test_usage_reports_prompt_tokens_the_cache_supplied(monkeypatch):
+    def cached(*_args):
+        result = queue.Queue()
+        result.put(NS(text="hi", prompt_tokens=50, generation_tokens=2,
+                      cached_tokens=30, finish_reason="stop"))
+        result.put(GenerationTerminal("stop", "completed", 50, 2, 0.1, 20.0, 30))
+        result.put(None)
+        return result
+
+    monkeypatch.setattr(serve_app, "submit", cached)
+    client = TestClient(serve_app.app)
+    chat = client.post("/v1/chat/completions", json={"messages": []}).json()
+    assert chat["usage"]["prompt_tokens"] == 50
+    assert chat["usage"]["prompt_tokens_details"] == {"cached_tokens": 30}
+
+    response = client.post("/v1/responses", json={"input": "hi"}).json()
+    assert response["usage"]["input_tokens"] == 50
+    assert response["usage"]["input_tokens_details"] == {"cached_tokens": 30}
+
+    message = client.post("/v1/messages", json={
+        "model": "m", "max_tokens": 5,
+        "messages": [{"role": "user", "content": "hi"}]}).json()
+    assert message["usage"] == {"input_tokens": 20, "output_tokens": 2,
+                                "cache_read_input_tokens": 30}
+
+    stream = client.post("/v1/messages", json={
+        "model": "m", "max_tokens": 5, "stream": True,
+        "messages": [{"role": "user", "content": "hi"}]}).text
+    assert '"cache_read_input_tokens": 30' in stream
+
+
 def test_prompt_cache_cap_follows_setting_then_memory_limit(monkeypatch):
     monkeypatch.setattr("mlxh.cli.total_ram_bytes", lambda: 64 * 10**9)
     explicit = InferenceEngine("/unused", "m", {**SETTINGS, "prompt_cache_gb": 3})

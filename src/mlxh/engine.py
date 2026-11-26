@@ -61,6 +61,7 @@ class GenerationTerminal:
     output_tokens: int
     generation_s: float
     tps: float
+    cached_tokens: int = 0
 
 
 @dataclass
@@ -323,7 +324,8 @@ class InferenceEngine(EngineLifecycle):
                 output_tokens = int(getattr(last, "generation_tokens", 0) or 0)
                 tps = float(getattr(last, "generation_tps", 0.0) or 0.0)
                 terminal = GenerationTerminal(
-                    finish_reason, outcome, prompt_tokens, output_tokens, duration, tps
+                    finish_reason, outcome, prompt_tokens, output_tokens, duration, tps,
+                    int(getattr(last, "cached_tokens", 0) or 0),
                 )
                 job.out.put(terminal)
                 job.out.put(None)
@@ -499,7 +501,10 @@ class InferenceEngine(EngineLifecycle):
             for path in tmp_files:
                 Path(path).unlink(missing_ok=True)
             done = int(getattr(last, "generation_tokens", 0) or 0)
-            print(f"[gen] end: {done} tokens in {time.perf_counter() - started:.1f}s", flush=True)
+            cached = int(getattr(last, "cached_tokens", 0) or 0)
+            print(f"[gen] end: {done} tokens in {time.perf_counter() - started:.1f}s"
+                  f" (prompt {int(getattr(last, 'prompt_tokens', 0) or 0)}, cached {cached})",
+                  flush=True)
 
     def snapshot(self):
         with self._stats_lock:

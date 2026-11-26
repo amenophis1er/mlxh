@@ -658,7 +658,7 @@ def cmd_status(args):
             print("No model workers loaded. The first API request starts one.")
         else:
             headers = ["MODEL", "KIND", "PID", "STATE", "QUEUE", "ACTIVE",
-                       "REQ", "ACTIVE GB", "IDLE UNLOAD IN"]
+                       "REQ", "ACTIVE GB", "PROMPT CACHE", "IDLE UNLOAD IN"]
             rows = [[w.get("model", "—"), w.get("model_kind") or "—",
                      str(w.get("pid") or "—"), str(w.get("state", "—")).upper(),
                      str(w.get("queue_depth") if w.get("queue_depth") is not None else "—"),
@@ -666,6 +666,7 @@ def cmd_status(args):
                      str(w.get("requests") if w.get("requests") is not None else "—"),
                      (_format_gb(w["active_memory_bytes"])
                       if w.get("active_memory_bytes") is not None else "—"),
+                     _format_prompt_cache(w.get("prompt_cache")),
                      (f"{w['idle_expires_in_s']}s"
                       if w.get("idle_expires_in_s") is not None else "—")]
                     for w in workers]

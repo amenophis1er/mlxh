@@ -100,7 +100,14 @@ def content_blocks(text, tool_calls):
     return blocks
 
 
-def message_response(model_id, text, tool_calls, prompt_tokens, output_tokens, finish_reason):
+def usage_of(prompt_tokens, output_tokens, cached_tokens=0):
+    # Anthropic counts cache reads apart from input_tokens.
+    return {"input_tokens": prompt_tokens - cached_tokens, "output_tokens": output_tokens,
+            "cache_read_input_tokens": cached_tokens}
+
+
+def message_response(model_id, text, tool_calls, prompt_tokens, output_tokens, finish_reason,
+                     cached_tokens=0):
     return {
         "id": f"msg_{uuid.uuid4().hex[:24]}",
         "type": "message",
@@ -109,7 +116,7 @@ def message_response(model_id, text, tool_calls, prompt_tokens, output_tokens, f
         "content": content_blocks(text, tool_calls),
         "stop_reason": stop_reason(tool_calls, finish_reason),
         "stop_sequence": None,
-        "usage": {"input_tokens": prompt_tokens, "output_tokens": output_tokens},
+        "usage": usage_of(prompt_tokens, output_tokens, cached_tokens),
     }
 
 

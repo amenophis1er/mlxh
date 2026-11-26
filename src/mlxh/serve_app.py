@@ -373,6 +373,13 @@ def _usage_counts(last, terminal):
             int(getattr(last, "generation_tokens", 0) or 0))
 
 
+def _cached_count(last, terminal):
+    """Prompt tokens the prefix cache supplied."""
+    if terminal:
+        return terminal.cached_tokens
+    return int(getattr(last, "cached_tokens", 0) or 0)
+
+
 @app.post("/v1/messages")
 def anthropic_messages(body: dict):
     """Anthropic Messages API (what Claude Code speaks)."""
@@ -460,8 +467,9 @@ def anthropic_messages(body: dict):
             yield ev("message_delta", {"type": "message_delta",
                                        "delta": {"stop_reason": anth.stop_reason(tool_calls, finish),
                                                  "stop_sequence": None},
-                                       "usage": {"input_tokens": prompt_tokens,
-                                                 "output_tokens": output_tokens}})
+                                       "usage": anth.usage_of(
+                                           prompt_tokens, output_tokens,
+                                           _cached_count(last, terminal))})
             yield ev("message_stop", {"type": "message_stop"})
 
         return StreamingResponse(sse(), media_type="text/event-stream")
@@ -487,6 +495,7 @@ def anthropic_messages(body: dict):
     return anth.message_response(
         MODEL_ID, text, tool_calls,
         prompt_tokens, output_tokens, _public_finish(last, terminal),
+        _cached_count(last, terminal),
     )
 
 
@@ -566,7 +575,7 @@ def openai_responses(body: dict):
                     "type": "response.output_item.done", "output_index": i,
                     "item": out_item})
             prompt_tokens, output_tokens = _usage_counts(last, terminal)
-            usage = oresp.usage_of(prompt_tokens, output_tokens)
+            usage = oresp.usage_of(prompt_tokens, output_tokens, _cached_count(last, terminal))
             timed_out = terminal and terminal.outcome == "timed_out"
             response = oresp.response_object(
                 resp_id, MODEL_ID, output, usage,
@@ -598,7 +607,7 @@ def openai_responses(body: dict):
         last = item
     text, tool_calls = parse_tool_calls("".join(parts))
     prompt_tokens, output_tokens = _usage_counts(last, terminal)
-    usage = oresp.usage_of(prompt_tokens, output_tokens)
+    usage = oresp.usage_of(prompt_tokens, output_tokens, _cached_count(last, terminal))
     timed_out = terminal and terminal.outcome == "timed_out"
     response = oresp.response_object(
         resp_id, MODEL_ID, oresp.output_items(text, tool_calls), usage,
@@ -760,6 +769,7 @@ def chat_completions(body: dict):
             "prompt_tokens": prompt_tokens,
             "completion_tokens": output_tokens,
             "total_tokens": prompt_tokens + output_tokens,
+            "prompt_tokens_details": {"cached_tokens": _cached_count(last, terminal)},
         }
 
     chunks = submit(body)

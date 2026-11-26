@@ -403,7 +403,8 @@ class Handler(BaseHTTPRequestHandler):
         body = json.dumps({"model": "fake-model", "model_kind": "language",
             "runtime": {"pid": __import__("os").getpid(), "ready": True,
                 "requests": 1},
-            "mlx": {"active_memory_bytes": 123}}).encode()
+            "mlx": {"active_memory_bytes": 123},
+            "prompt_cache": {"entries": 2, "bytes": 5, "hits": 1}}).encode()
         self.send_response(200); self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
     def do_POST(self):
@@ -449,6 +450,7 @@ HTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
         assert loaded[0]["pid"] > 0
         assert loaded[0]["active_memory_bytes"] == 123
         assert loaded[0]["requests"] == 1
+        assert loaded[0]["prompt_cache"] == {"entries": 2, "bytes": 5, "hits": 1}
 
         deadline = time.monotonic() + 4
         while time.monotonic() < deadline:

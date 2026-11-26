@@ -6,9 +6,11 @@ Two families are supported behind one Runner interface:
 - Stock MLX models (anything mlx_vlm or mlx_lm can load, e.g. mlx-community/*).
 """
 
+import copy
 import json
 import os
 import sys
+import time
 import warnings
 from pathlib import Path
 
@@ -85,8 +87,10 @@ class TextRunner:
         """Prefix caching: keep finished KV caches, reuse the longest prefix.
 
         Mirrors mlx_lm.server: entries are keyed by prompt + generated tokens
-        so the next agent turn (which echoes the assistant reply) hits. The
-        LRU is bounded by bytes and entries; eviction happens on insert.
+        so the next agent turn (which echoes the assistant reply) hits. A
+        cache that cannot be trimmed also keeps a snapshot taken at the end of
+        the prompt (see stream). The LRU is bounded by bytes and entries;
+        eviction happens on insert.
         """
         from mlx_lm.models.cache import LRUPromptCache
         self.prompt_cache = LRUPromptCache(max_size=max_entries, max_bytes=int(max_bytes))
@@ -158,15 +162,23 @@ class TextRunner:
             else:
                 self.cache_misses += 1
         processed = len(prompt)
+        snapshot, prefill_s = None, 0.0
         completed = False
         try:
+            if key is not None and self._wants_snapshot(cache, prompt):
+                started = time.perf_counter()
+                snapshot = (key[:-1], self._prefill_snapshot(cache, prompt[:-1]))
+                prefill_s = time.perf_counter() - started
+                prompt = prompt[-1:]
             for response in stream_generate(
                 self.model, self.tokenizer, prompt, max_tokens=max_tokens, **kwargs
             ):
                 response.cached_tokens = cached
-                # Usage counts the full prompt; prompt_tps stays what mlx-lm
-                # measured over the tokens it actually processed.
+                # Usage counts the full prompt; prompt_tps stays what was
+                # measured over the tokens actually processed.
                 response.prompt_tokens = processed + cached
+                if prefill_s and response.prompt_tps:
+                    response.prompt_tps = processed / (prefill_s + len(prompt) / response.prompt_tps)
                 if key is not None:
                     key.append(response.token)
                 yield response
@@ -179,8 +191,60 @@ class TextRunner:
         finally:
             # The LRU enforces the byte cap on insert (superseded prefixes are
             # dropped first), so a failed request never evicts anything.
+            if completed and snapshot is not None:
+                self._drop_superseded(snapshot[0])
             if completed and key is not None and len(key) > processed + cached:
                 self.prompt_cache.insert_cache(self._cache_key, key, cache)
+            if completed and snapshot is not None:
+                self.prompt_cache.insert_cache(self._cache_key, *snapshot, cache_type="user")
+
+    @staticmethod
+    def _wants_snapshot(cache, prompt):
+        """A trimmable cache is cut back to any prefix of the final entry; one
+        that cannot be (linear attention keeps a running state) is only reusable
+        up to where it was stored. The next turn's history drops the reasoning,
+        so it shares the prompt with this one, not the reply."""
+        from mlx_lm.models.cache import can_trim_prompt_cache
+        return len(prompt) > 1 and not can_trim_prompt_cache(cache)
+
+    def _prefill_snapshot(self, cache, tokens, step=2048):
+        """Process all but the last prompt token, as mlx_lm's generate_step
+        does (same chunks, same stream: a miss computes exactly what it would
+        uncached), and return a copy of the cache at that point."""
+        import mlx.core as mx
+        from mlx_lm.generate import generation_stream
+        with mx.stream(generation_stream):
+            for start in range(0, len(tokens), step):
+                self.model(mx.array(tokens[start:start + step])[None], cache=cache)
+                mx.eval([c.state for c in cache])
+                mx.clear_cache()
+        return copy.deepcopy(cache)
+
+    def _drop_superseded(self, key):
+        """Before a snapshot at `key` is stored, drop what it makes dead weight:
+        the conversation's earlier snapshots (strict prefixes of key) and the
+        replies stored after them that the conversation did not keep (they
+        extend a dropped prefix but not key). Untrimmable entries are never
+        dropped by the LRU itself, so without this each turn would be charged
+        again for the whole history before it. Uses LRUPromptCache's internals,
+        which both pinned mlx-lm versions share."""
+        lru = self.prompt_cache
+        stored = [(kind, tokens) for kind, queue in lru._lru._lrus.items()
+                  for _, tokens in queue]
+
+        def extends(tokens, prefix):
+            return len(tokens) > len(prefix) and tokens[:len(prefix)] == prefix
+
+        prefixes = [tokens for _, tokens in stored if extends(key, tokens)]
+        stale = [tokens for kind, tokens in stored
+                 if kind == "assistant" and tokens not in prefixes
+                 and tokens[:len(key)] != key
+                 and any(extends(tokens, prefix) for prefix in prefixes)]
+        for tokens in prefixes + stale:
+            entry = lru._trie.pop(self._cache_key, tokens)
+            lru._n_bytes -= entry.nbytes
+            lru._n_bytes_by_type[entry.cache_type] -= entry.nbytes
+            lru._lru.remove(self._cache_key, tokens)
 
     @staticmethod
     def _cache_is_sound(cache):
