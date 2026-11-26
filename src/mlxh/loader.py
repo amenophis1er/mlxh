@@ -195,6 +195,22 @@ class TextRunner:
         return self.tokenizer.decode([token_id])
 
 
+class InklingRunner(TextRunner):
+    """Inkling 2 (mlx-lm's inkling2 model): its own effort setting and message format."""
+
+    def template(self, messages, num_images=0, tools=None, thinking=None):
+        kwargs = {"tools": tools} if tools else {}
+        if thinking is False:
+            kwargs["reasoning_effort"] = "none"
+        return self.tokenizer.apply_chat_template(
+            messages, tokenize=True, add_generation_prompt=True, **kwargs
+        )
+
+    def output_parser(self):
+        from .inkling import InklingParser
+        return InklingParser()
+
+
 def _quiet_libraries():
     # Load-time advisories the user can't act on (unknown custom model_type,
     # tokenizer-regex heuristics); the pack runtimes own those choices.
@@ -222,6 +238,13 @@ def load_runner(model_dir):
         from mlx_lm.utils import load_tokenizer
         model, _ = load_model(model_dir)
         return TextRunner(model, load_tokenizer(model_dir))
+
+    from .inkling import is_inkling
+    if is_inkling(model_type):
+        # mlx-vlm does not know it (and says so loudly): mlx-lm's own model, text in, text out
+        from mlx_lm import load as lm_load
+        model, tokenizer = lm_load(str(model_dir))
+        return InklingRunner(model, tokenizer)
 
     def _short(e, n=180):
         s = " ".join(str(e).split())

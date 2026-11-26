@@ -82,6 +82,9 @@ def _serve_argv(model: str, port: int) -> list[str]:
     except SystemExit as exc:
         if kind == "image":
             raise RuntimeError("image runtime is unavailable; run `mlxh images install`") from None
+        from .inkling import is_inkling_model
+        if is_inkling_model(path):
+            raise RuntimeError("Inkling 2 runtime is unavailable; run `mlxh inkling install`") from None
         raise RuntimeError(f"could not prepare worker for '{model}'") from exc
 
 

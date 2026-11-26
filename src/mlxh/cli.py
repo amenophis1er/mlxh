@@ -10,6 +10,7 @@ Commands:
   mlxh serve <name> [--port N ...]    OpenAI + Anthropic compatible API server
   mlxh serve [--port N ...]          model manager; workers load on demand
   mlxh images install                install optional local image generation
+  mlxh inkling install               install optional Inkling 2 support
   mlxh image [model] [prompt...]     generate images interactively or once
   mlxh status [--json]                show live stats of the local server
   mlxh service <action>               manage the login LaunchAgent
@@ -359,6 +360,13 @@ def do_pull(cfg, repo, name, force=False, kind="auto", backend=None):
         **({"kind": "image", **image_spec} if image else {}),
     }, indent=2))
     ui.ok(f"pulled {repo}@{revision[:7]} as '{name}'")
+    from .inkling import is_inkling_model
+    if is_inkling_model(dest):
+        # pulled either way; it runs once its runtime is there
+        try:
+            _ensure_inkling_runtime(interactive=True)
+        except SystemExit:
+            pass
 
 
 def cmd_pull(args):
@@ -370,29 +378,50 @@ def cmd_pull(args):
             else f"chat: mlxh chat {name}    serve: mlxh serve {name}")
 
 
-def _ensure_image_runtime(interactive=False):
+def _ensure_runtime(runtime, what, size, interactive=False):
     from .image_runtime import runtime_python, install
     try:
-        return runtime_python(HOME)
+        return runtime_python(HOME, runtime)
     except RuntimeError:
         if interactive and sys.stdin.isatty() and sys.stdout.isatty():
-            ui.note("Image support needs a pinned runtime (several hundred MB plus dependencies).")
-            if input("Install image support now? [y/N] ").strip().lower() in ("y", "yes"):
+            ui.note(f"{what} needs a pinned runtime ({size}).")
+            if input(f"Install {what.lower()} now? [y/N] ").strip().lower() in ("y", "yes"):
                 try:
-                    install(HOME)
-                    return runtime_python(HOME)
+                    install(HOME, runtime)
+                    return runtime_python(HOME, runtime)
                 except RuntimeError as exc:
                     ui.fail(str(exc))
-        ui.fail("install image support with: mlxh images install")
+        ui.fail(f"install {what.lower()} with: mlxh {runtime.name} install")
+
+
+def _ensure_image_runtime(interactive=False):
+    from .image_runtime import IMAGES
+    return _ensure_runtime(IMAGES, "Image support", "several hundred MB plus dependencies",
+                           interactive)
+
+
+def _ensure_inkling_runtime(interactive=False):
+    from .image_runtime import INKLING
+    return _ensure_runtime(INKLING, "Inkling 2 support",
+                           "a separate environment with the mlx-lm that has it", interactive)
 
 
 def cmd_images(_args):
-    from .image_runtime import install
+    from .image_runtime import IMAGES, install
     try:
-        install(HOME)
+        install(HOME, IMAGES)
     except RuntimeError as exc:
         ui.fail(str(exc))
     ui.ok("image support is installed")
+
+
+def cmd_inkling(_args):
+    from .image_runtime import INKLING, install
+    try:
+        install(HOME, INKLING)
+    except RuntimeError as exc:
+        ui.fail(str(exc))
+    ui.ok("Inkling 2 support is installed")
 
 
 def _require_language(path):
@@ -525,7 +554,13 @@ def serve_argv(cfg, name, path, overrides=None):
     def pick(key):
         return o.get(key) if o.get(key) is not None else cfg[key]
 
-    python = _ensure_image_runtime() if checked_model_kind(path) == "image" else sys.executable
+    from .inkling import is_inkling_model
+    if checked_model_kind(path) == "image":
+        python = _ensure_image_runtime()
+    elif is_inkling_model(path):
+        python = _ensure_inkling_runtime()
+    else:
+        python = sys.executable
     return [
         python, *(["-I"] if python != sys.executable else []), "-m", "mlxh.serve_app",
         "--model-path", path, "--name", name,
@@ -1647,13 +1682,14 @@ def cmd_update(args):
     if result.returncode:
         raise SystemExit(result.returncode)
 
-    # The image runtime is a separately staged environment containing a copy
-    # of mlxh, so refresh it whenever it already exists.
-    if (HOME / "images" / "current").exists():
-        sync = subprocess.run([sys.executable, "-m", "mlxh.cli", "images", "install"])
-        if sync.returncode:
-            ui.fail("mlxh updated, but the image runtime could not be synchronized",
-                    hint="run mlxh images install to repair it")
+    # The optional runtimes are separately staged environments containing a
+    # copy of mlxh, so refresh each one that already exists.
+    failed = [name for name in ("images", "inkling")
+              if (HOME / name / "current").exists()
+              and subprocess.run([sys.executable, "-m", "mlxh.cli", name, "install"]).returncode]
+    if failed:
+        ui.fail(f"mlxh updated, but the {' and '.join(failed)} runtime could not be synchronized",
+                hint="; ".join(f"run mlxh {name} install to repair it" for name in failed))
 
     ui.ok("mlxh updated. Restart any running server or service to load the new version.")
 
@@ -1695,6 +1731,10 @@ def main():
     p = sub.add_parser("images", help="manage optional image generation support")
     p.add_argument("action", choices=["install"])
     p.set_defaults(fn=cmd_images)
+
+    p = sub.add_parser("inkling", help="manage optional Inkling 2 support")
+    p.add_argument("action", choices=["install"])
+    p.set_defaults(fn=cmd_inkling)
 
     p = sub.add_parser("link", help="symlink an existing local model directory in")
     p.add_argument("path")

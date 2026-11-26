@@ -15,6 +15,8 @@ Supports these model families:
   loaded through the runtime code bundled inside the pack.
 - **Stock MLX models** (anything `mlx_vlm` / `mlx_lm` loads, e.g. most of
   `mlx-community/*`).
+- **Inkling 2 Mini** (`mlx-community/Inkling-2-Mini-4bit`) — text, reasoning
+  and tool calls, from its own runtime: `mlxh inkling install`.
 - **Local image generation** with MFLUX: FLUX.1 Schnell, FLUX.2 Klein 4B, and
   Qwen Image 2512. See [image generation](docs/IMAGES.md).
 

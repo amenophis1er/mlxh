@@ -421,8 +421,13 @@ class InferenceEngine(EngineLifecycle):
                                 raise EngineError(
                                     400, "tool_calls arguments must be JSON"
                                 ) from None
-                        calls.append({"function": function})
+                        calls.append({**({"id": call["id"]} if call.get("id") else {}),
+                                      "function": function})
                     normalized["tool_calls"] = calls
+                # which call a tool result answers (templates such as Inkling's name it)
+                for key in ("tool_call_id", "name"):
+                    if isinstance(message.get(key), str) and message[key]:
+                        normalized[key] = message[key]
                 messages.append(normalized)
         except BaseException:
             for path in tmp_files:
@@ -441,7 +446,8 @@ class InferenceEngine(EngineLifecycle):
         prompt = self.runner.template(
             messages, num_images=len(images), tools=request.tools, thinking=thinking
         )
-        reasoning_parser = ReasoningParser(
+        own_parser = getattr(self.runner, "output_parser", None)
+        reasoning_parser = own_parser() if own_parser else ReasoningParser(
             isinstance(prompt, str) and prompt.rstrip().endswith("<think>")
         )
         cap = self.settings["max_prompt_tokens"]

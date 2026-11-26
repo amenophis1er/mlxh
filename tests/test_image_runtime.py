@@ -25,7 +25,7 @@ def test_mismatched_private_runtime_is_refused(tmp_path, monkeypatch):
 
 def test_runtime_path_keeps_venv_interpreter(tmp_path, monkeypatch):
     identity = {"mlxh": "1", "code": "abc", "mflux": runtime.MFLUX_VERSION}
-    monkeypatch.setattr(runtime, "code_identity", lambda: identity)
+    monkeypatch.setattr(runtime, "code_identity", lambda *_: identity)
     monkeypatch.setattr(runtime.importlib.metadata, "version", lambda name: "old")
     monkeypatch.setattr(runtime.subprocess, "run", lambda *a, **k: NS(stdout=json.dumps(identity)))
     root = tmp_path / "images"
@@ -45,7 +45,7 @@ def test_staged_install_activates_only_after_validation(tmp_path, monkeypatch, f
     (root / "current").symlink_to("old")
     stale = root / "env-stale"
     stale.mkdir()
-    monkeypatch.setattr(runtime, "runtime_python", lambda _: (_ for _ in ()).throw(RuntimeError("stale")))
+    monkeypatch.setattr(runtime, "runtime_python", lambda *_: (_ for _ in ()).throw(RuntimeError("stale")))
     monkeypatch.setattr(runtime.shutil, "which", lambda _: "/bin/uv")
     calls = []
 
@@ -74,7 +74,7 @@ def test_staged_install_activates_only_after_validation(tmp_path, monkeypatch, f
 
 
 def test_install_idempotent(tmp_path, monkeypatch):
-    monkeypatch.setattr(runtime, "runtime_python", lambda _: "/managed/python")
+    monkeypatch.setattr(runtime, "runtime_python", lambda *_: "/managed/python")
     monkeypatch.setattr(runtime.shutil, "which", lambda _: "/bin/uv")
     monkeypatch.setattr(runtime.subprocess, "run", lambda *a, **k: pytest.fail("reinstalled"))
     runtime.install(tmp_path)

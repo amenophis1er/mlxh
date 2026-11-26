@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Inkling 2 Mini** (`mlx-community/Inkling-2-Mini-4bit`): served from its own
+  runtime, `mlxh inkling install` (offered on `mlxh pull`), with mlx-lm pinned
+  to the reviewed commit of ml-explore/mlx-lm#2086. mlxh's own environment stays
+  on mlx-lm 0.31.3, because newer mlx-lm moves the classes the Prism (Bonsai)
+  packs import. Inkling's tagged messages map onto mlxh's reasoning split and
+  tool calls; thinking `off` asks for no effort. Text only for now; the
+  `-oQ4e-mtp` packing does not load with that commit. Its prompt cache cannot
+  be trimmed, so only a strict prefix is reused across turns.
+- The image runtime's installer is now shared by both optional runtimes;
+  `mlxh update` refreshes each one present.
+
 ## v0.2.1 — 2026-11-11
 
 - **Prefix cache for text-only models**: `TextRunner` (models loaded through

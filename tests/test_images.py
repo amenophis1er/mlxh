@@ -544,13 +544,13 @@ def test_interactive_runtime_install_offer(monkeypatch, answer, installed):
     from mlxh import image_runtime
     calls = []
 
-    def python(_):
+    def python(*_):
         if calls:
             return "private-python"
         raise RuntimeError("missing")
 
     monkeypatch.setattr(image_runtime, "runtime_python", python)
-    monkeypatch.setattr(image_runtime, "install", lambda _: calls.append("installed"))
+    monkeypatch.setattr(image_runtime, "install", lambda *_: calls.append("installed"))
     monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: True)
     monkeypatch.setattr("builtins.input", lambda _: answer)
@@ -564,8 +564,8 @@ def test_interactive_runtime_install_offer(monkeypatch, answer, installed):
 
 def test_noninteractive_runtime_does_not_install(monkeypatch, capsys):
     from mlxh import image_runtime
-    monkeypatch.setattr(image_runtime, "runtime_python", lambda _: (_ for _ in ()).throw(RuntimeError()))
-    monkeypatch.setattr(image_runtime, "install", lambda _: pytest.fail("installed"))
+    monkeypatch.setattr(image_runtime, "runtime_python", lambda *_: (_ for _ in ()).throw(RuntimeError()))
+    monkeypatch.setattr(image_runtime, "install", lambda *_: pytest.fail("installed"))
     monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False)
     with pytest.raises(SystemExit):
         cli._ensure_image_runtime(interactive=True)
