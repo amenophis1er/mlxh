@@ -96,14 +96,28 @@ def to_openai_body(body):
     return out
 
 
-def output_items(text, tool_calls):
+def new_id(prefix):
+    return f"{prefix}_{uuid.uuid4().hex[:24]}"
+
+
+def reasoning_item(item_id, text, status="completed"):
+    return {"id": item_id, "type": "reasoning", "status": status, "summary": [],
+            "content": [{"type": "reasoning_text", "text": text}] if text else []}
+
+
+def message_item(item_id, text, status="completed"):
+    return {"id": item_id, "type": "message", "role": "assistant", "status": status,
+            "content": [{"type": "output_text", "text": text, "annotations": []}] if text else []}
+
+
+def output_items(text, tool_calls, reasoning="", ids=None):
+    """Output in generation order; ids maps "reasoning"/"message" to streamed item ids."""
+    ids = ids or {}
     items = []
+    if reasoning:
+        items.append(reasoning_item(ids.get("reasoning") or new_id("rs"), reasoning))
     if text:
-        items.append({
-            "id": f"msg_{uuid.uuid4().hex[:24]}", "type": "message",
-            "role": "assistant", "status": "completed",
-            "content": [{"type": "output_text", "text": text, "annotations": []}],
-        })
+        items.append(message_item(ids.get("message") or new_id("msg"), text))
     for tc in tool_calls or []:
         items.append({
             "id": f"fc_{uuid.uuid4().hex[:24]}", "type": "function_call",

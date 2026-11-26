@@ -37,9 +37,18 @@ Server-side limits (see README "Server controls"):
 - MLX memory is capped (default 80% of RAM); allocations beyond it fail the
   request with **500**, not the machine.
 
-Models whose chat template pre-opens a reasoning block (e.g. Bonsai) have the
-`<think>…</think>` reasoning stripped from responses; the `thinking` setting
-(`auto`/`on`/`off`) controls whether the model reasons at all.
+A model's reasoning (`<think>…</think>`, or Inkling's thinking messages) never
+appears in the answer text. Each dialect returns it separately: chat
+completions as `message.reasoning_content` (and `delta.reasoning_content` when
+streaming), Anthropic as a `thinking` block before the text, Responses as a
+`reasoning` output item with `reasoning_text` content
+(`response.reasoning_text.delta` when streaming). The field or item is left
+out when the model did not reason. The `thinking` setting (`auto`/`on`/`off`)
+controls whether the model reasons at all.
+
+Anthropic thinking blocks carry a `signature` (a hash of the text) so clients
+can send them back; mlxh does not check it, and thinking blocks sent back are
+not shown to the model again.
 
 ## OpenAI dialect
 
@@ -277,8 +286,8 @@ JSON parsing, and decoded images are capped at 25 MiB each.
 ## Not implemented
 
 `n > 1`, streaming logprobs, `response_format`/JSON mode, enforced `tool_choice`,
-`stop` sequences, embeddings, audio/video input, Anthropic `thinking` blocks
-in responses (reasoning is stripped instead). Manager mode routes supported
+`stop` sequences, embeddings, audio/video input, reasoning summaries
+(Responses `summary` is always empty). Manager mode routes supported
 chat, Responses, Anthropic, and image endpoints by request model; fixed-model
 mode continues to ignore request model selection.
 

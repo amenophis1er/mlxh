@@ -27,6 +27,16 @@
   send these fields unasked (Claude Code's `thinking`, Codex's
   `reasoning.effort`) now override `thinking off`/`on` on the server, where
   the fields were ignored before.
+- **Reasoning in API responses**: the model's reasoning, which was dropped,
+  now comes back beside the answer: `reasoning_content` on chat completions
+  (message and stream deltas), a signed `thinking` block on Anthropic, and a
+  `reasoning` output item on Responses. Answer text stays free of reasoning,
+  and streamed text still stops at a tool call.
+- Responses streaming now sends the text of answers shorter than the
+  tool-call marker (`Paris`), and its `output_item.done` ids match the ones
+  streamed. When a tool call does not parse, Anthropic and Responses streams
+  send it as text, as the non-streaming responses do; Anthropic's stream
+  dropped it before.
 
 ## v0.2.2 — 2026-11-25
 

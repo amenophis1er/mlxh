@@ -5,6 +5,8 @@ already understands; results are wrapped back into Anthropic message
 objects / SSE events. Pure functions — no FastAPI, no model code.
 """
 
+import base64
+import hashlib
 import json
 import uuid
 
@@ -91,8 +93,17 @@ def stop_reason(tool_calls, finish_reason):
     return "max_tokens" if finish_reason == "length" else "end_turn"
 
 
-def content_blocks(text, tool_calls):
-    blocks = []
+def signature(thinking):
+    """Opaque signature for a thinking block. Clients echo it back; nothing checks it."""
+    return base64.b64encode(hashlib.sha256(thinking.encode()).digest()).decode()
+
+
+def thinking_block(thinking):
+    return {"type": "thinking", "thinking": thinking, "signature": signature(thinking)}
+
+
+def content_blocks(text, tool_calls, thinking=""):
+    blocks = [thinking_block(thinking)] if thinking else []
     if text:
         blocks.append({"type": "text", "text": text})
     for tc in tool_calls or []:
@@ -112,13 +123,13 @@ def usage_of(prompt_tokens, output_tokens, cached_tokens=0):
 
 
 def message_response(model_id, text, tool_calls, prompt_tokens, output_tokens, finish_reason,
-                     cached_tokens=0):
+                     cached_tokens=0, thinking=""):
     return {
         "id": f"msg_{uuid.uuid4().hex[:24]}",
         "type": "message",
         "role": "assistant",
         "model": model_id,
-        "content": content_blocks(text, tool_calls),
+        "content": content_blocks(text, tool_calls, thinking),
         "stop_reason": stop_reason(tool_calls, finish_reason),
         "stop_sequence": None,
         "usage": usage_of(prompt_tokens, output_tokens, cached_tokens),
