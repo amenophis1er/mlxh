@@ -71,10 +71,12 @@ def test_cut_off_mid_call_still_gives_what_came():
 
 def test_inkling_loads_with_mlx_lm_not_mlx_vlm(tmp_path, monkeypatch):
     (tmp_path / "config.json").write_text(json.dumps({"model_type": "inkling2_loop"}))
-    import mlx_lm
-    import mlx_vlm
-    monkeypatch.setattr(mlx_lm, "load", lambda path: ("model", "tok"))
-    monkeypatch.setattr(mlx_vlm, "load", lambda path: pytest.fail("mlx-vlm asked"))
+    import sys
+    import types
+    # stand-ins: the unit job runs without MLX
+    monkeypatch.setitem(sys.modules, "mlx_lm", types.SimpleNamespace(load=lambda path: ("model", "tok")))
+    monkeypatch.setitem(sys.modules, "mlx_vlm", types.SimpleNamespace(
+        load=lambda path: pytest.fail("mlx-vlm asked")))
     runner = loader.load_runner(tmp_path)
     assert isinstance(runner, loader.InklingRunner)
     assert isinstance(runner.output_parser(), InklingParser)
