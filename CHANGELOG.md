@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.2.3 — 2026-11-27
+
 - **Prompt cache across agent turns**: a cache that cannot be trimmed
   (Inkling 2, Qwen 3.5-style hybrids loaded through mlx-lm) is also kept as
   it stood at the end of each prompt, so the next turn reuses everything up
