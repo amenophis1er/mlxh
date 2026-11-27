@@ -382,17 +382,57 @@ def _phases(item):
     return phases
 
 
-def _unsent(full, printed, tool_calls):
-    """Answer text a stream still owes: all of it when no call parsed."""
-    return full[printed:] if not tool_calls else _before_marker(full, True)[printed:]
+class _Reasoning:
+    """Reasoning as it streams, held back until there is something in it: an
+    empty think block is not reasoning."""
+
+    def __init__(self):
+        self.text, self.sent = "", 0
+
+    def feed(self, delta):
+        self.text += delta
+        if not self.text.strip():
+            return ""
+        delta, self.sent = self.text[self.sent:], len(self.text)
+        return delta
+
+
+def _reasoning_of(items):
+    text = "".join(getattr(item, "reasoning_text", "") for item in items)
+    return text if text.strip() else ""
+
+
+def _new_text(visible, printed, started):
+    """Answer text not yet streamed; leading whitespace waits for real text."""
+    delta = visible[printed:]
+    return delta if started or delta.strip() else ""
+
+
+def _unsent(full, printed, text, tool_calls):
+    """Answer text a stream still owes at its end, given the parsed `text`:
+    all of the output when no call parsed, else what precedes the first call
+    and whatever the model wrote after the calls."""
+    if not tool_calls:
+        return full[printed:]
+    before = _before_marker(full, True)
+    head = before.strip()
+    if not head:  # nothing but whitespace before the call, so none of it was sent
+        return text
+    after = text[len(before.lstrip()):] if text.startswith(head) else ""
+    return before[printed:] + after
 
 
 def _before_marker(full, final=False):
-    """Text safe to stream: up to a tool call, holding back a partial marker."""
+    """Text safe to stream: up to a tool call, holding back a tail that could
+    still turn out to be the start of one."""
     cut = full.find(MARKER)
     if cut != -1:
         return full[:cut]
-    return full if final else full[: max(0, len(full) - len(MARKER))]
+    if not final:
+        for size in range(min(len(full), len(MARKER) - 1), 0, -1):
+            if MARKER.startswith(full[-size:]):
+                return full[:-size]
+    return full
 
 
 def _public_finish(last, terminal):
@@ -434,6 +474,7 @@ def anthropic_messages(body: dict):
             ev = anth.sse_event
             parts, last, terminal, printed = [], None, None, 0
             block = {"index": -1, "kind": None, "thinking": ""}
+            thought, text_started = _Reasoning(), False
 
             def close_block():
                 if block["kind"] == "thinking":
@@ -491,16 +532,18 @@ def anthropic_messages(body: dict):
                 last = item
                 for phase, text in _phases(item):
                     if phase == "reasoning":
-                        yield from delta("thinking", text)
+                        text = thought.feed(text)
+                        if text:
+                            yield from delta("thinking", text)
                         continue
                     parts.append(text)
-                    visible = _before_marker("".join(parts))
-                    if len(visible) > printed:
-                        yield from delta("text", visible[printed:])
-                        printed = len(visible)
+                    new = _new_text(_before_marker("".join(parts)), printed, text_started)
+                    if new:
+                        yield from delta("text", new)
+                        printed, text_started = printed + len(new), True
             full = "".join(parts)
-            _, tool_calls = parse_tool_calls(full)
-            rest = _unsent(full, printed, tool_calls)
+            text, tool_calls = parse_tool_calls(full)
+            rest = _new_text(_unsent(full, printed, text, tool_calls), 0, text_started)
             if rest:
                 yield from delta("text", rest)
             yield from close_block()
@@ -543,14 +586,14 @@ def anthropic_messages(body: dict):
         if isinstance(item, BaseException):
             raise HTTPException(500, str(item))
         parts.append(item.text)
-        thought.append(getattr(item, "reasoning_text", ""))
+        thought.append(item)
         last = item
     text, tool_calls = parse_tool_calls("".join(parts))
     prompt_tokens, output_tokens = _usage_counts(last, terminal)
     return anth.message_response(
         MODEL_ID, text, tool_calls,
         prompt_tokens, output_tokens, _public_finish(last, terminal),
-        _cached_count(last, terminal), thinking="".join(thought),
+        _cached_count(last, terminal), thinking=_reasoning_of(thought),
     )
 
 
@@ -568,7 +611,7 @@ def openai_responses(body: dict):
                 "type": "response.created",
                 "response": oresp.response_object(resp_id, MODEL_ID, [],
                                                   oresp.usage_of(0, 0), "in_progress")})
-            parts, thought, last, terminal, err, printed = [], [], None, None, None, 0
+            parts, thought, last, terminal, err, printed = [], _Reasoning(), None, None, None, 0
             ids, opened = {}, []  # streamed item ids; kinds in output order
 
             def item_event(kind, **fields):
@@ -587,8 +630,9 @@ def openai_responses(body: dict):
                     "item": make(ids[kind], "", "in_progress")})
                 yield item_event("response.content_part.added", of=kind, at=kind, part=part)
 
-            def stream_text(delta):
+            def stream_text(visible):
                 nonlocal printed
+                delta = _new_text(visible, printed, "message" in ids)
                 if not delta:
                     return
                 if "message" not in ids:
@@ -614,14 +658,16 @@ def openai_responses(body: dict):
                 last = item
                 for phase, delta in _phases(item):
                     if phase == "reasoning":
+                        delta = thought.feed(delta)
+                        if not delta:
+                            continue
                         if "reasoning" not in ids:
                             yield from open_item("reasoning")
-                        thought.append(delta)
                         yield item_event("response.reasoning_text.delta", of="reasoning",
                                          at="reasoning", delta=delta)
                         continue
                     parts.append(delta)
-                    yield from stream_text(_before_marker("".join(parts))[printed:])
+                    yield from stream_text(_before_marker("".join(parts)))
             if err is not None:
                 yield ev("response.failed", {
                     "type": "response.failed",
@@ -631,8 +677,8 @@ def openai_responses(body: dict):
                 return
             full = "".join(parts)
             text, tool_calls = parse_tool_calls(full)
-            reasoning = "".join(thought)
-            yield from stream_text(_unsent(full, printed, tool_calls))
+            reasoning = thought.text
+            yield from stream_text(full[:printed] + _unsent(full, printed, text, tool_calls))
             if "reasoning" in ids:
                 yield item_event("response.reasoning_text.done", of="reasoning",
                                  at="reasoning", text=reasoning)
@@ -680,14 +726,14 @@ def openai_responses(body: dict):
         if isinstance(item, BaseException):
             raise HTTPException(500, str(item))
         parts.append(item.text)
-        thought.append(getattr(item, "reasoning_text", ""))
+        thought.append(item)
         last = item
     text, tool_calls = parse_tool_calls("".join(parts))
     prompt_tokens, output_tokens = _usage_counts(last, terminal)
     usage = oresp.usage_of(prompt_tokens, output_tokens, _cached_count(last, terminal))
     timed_out = terminal and terminal.outcome == "timed_out"
     response = oresp.response_object(
-        resp_id, MODEL_ID, oresp.output_items(text, tool_calls, "".join(thought)), usage,
+        resp_id, MODEL_ID, oresp.output_items(text, tool_calls, _reasoning_of(thought)), usage,
         "incomplete" if timed_out else "completed",
     )
     if timed_out:
@@ -776,8 +822,9 @@ async def private_generate(body: dict, request: Request):
 
             full = "".join(parts)
             content, tool_calls = parse_tool_calls(full)
-            if len(content) > printed:
-                yield _private_event("text_delta", {"text": content[printed:]})
+            rest = _unsent(full, printed, content, tool_calls)
+            if rest:
+                yield _private_event("text_delta", {"text": rest})
             if tool_calls:
                 yield _private_event("tool_calls", {"calls": tool_calls})
             terminal = terminal or GenerationTerminal(
@@ -855,7 +902,7 @@ def chat_completions(body: dict):
 
         def sse():
             yield chunk_of({"role": "assistant"})
-            last, terminal = None, None
+            last, terminal, thought = None, None, _Reasoning()
             parts = []
             while True:
                 try:
@@ -876,7 +923,9 @@ def chat_completions(body: dict):
                 last = item
                 for phase, delta in _phases(item):
                     if phase == "reasoning":
-                        yield chunk_of({"reasoning_content": delta})
+                        delta = thought.feed(delta)
+                        if delta:
+                            yield chunk_of({"reasoning_content": delta})
                     elif has_tools:
                         # Tool-call XML must be parsed whole; buffer instead of streaming.
                         parts.append(delta)
@@ -916,7 +965,7 @@ def chat_completions(body: dict):
         if isinstance(item, BaseException):
             raise HTTPException(500, str(item))
         parts.append(item.text)
-        thought.append(getattr(item, "reasoning_text", ""))
+        thought.append(item)
         last = item
         if hasattr(item, "logprobs_out"):
             top_ids, top_lps, token_lp = item.logprobs_out
@@ -926,8 +975,8 @@ def chat_completions(body: dict):
             ))
     content, tool_calls = parse_tool_calls("".join(parts))
     message = {"role": "assistant", "content": content or None}
-    if "".join(thought):
-        message["reasoning_content"] = "".join(thought)
+    if _reasoning_of(thought):
+        message["reasoning_content"] = _reasoning_of(thought)
     if tool_calls:
         message["tool_calls"] = tool_calls
     return {

@@ -32,11 +32,14 @@
   (message and stream deltas), a signed `thinking` block on Anthropic, and a
   `reasoning` output item on Responses. Answer text stays free of reasoning,
   and streamed text still stops at a tool call.
-- Responses streaming now sends the text of answers shorter than the
-  tool-call marker (`Paris`), and its `output_item.done` ids match the ones
-  streamed. When a tool call does not parse, Anthropic and Responses streams
-  send it as text, as the non-streaming responses do; Anthropic's stream
-  dropped it before.
+- Stream fixes that came with it. Responses streaming held back the last 11
+  characters of every answer (all of a short one such as `Paris`) and never
+  sent them as deltas; streamed text now waits only for a tail that could
+  still become a tool call. Its `output_item.done` ids match the ones
+  streamed. On Anthropic and Responses streams, a tool call that does not
+  parse and any text after a tool call are now sent as text, as the
+  non-streaming responses have them. `mlxh chat` no longer drops characters
+  from an answer that starts with whitespace.
 
 ## v0.2.2 — 2026-11-25
 

@@ -194,3 +194,170 @@ def test_streams_send_an_unparsed_call_as_text_like_the_plain_response(model):
     text = "".join(e["delta"] for e in events if e["type"] == "response.output_text.delta")
     final = [e for e in events if e["type"] == "response.completed"][0]["response"]["output"]
     assert text.strip() == final[0]["content"][0]["text"] == plain["content"][0]["text"]
+
+
+# --- stream endings, event fields, empty reasoning --------------------------
+
+def anthropic_stream(**body):
+    return sse(client.post("/v1/messages", json={"messages": HI, "max_tokens": 50,
+                                                 "stream": True, **body}))
+
+
+def responses_stream():
+    return sse(client.post("/v1/responses", json={"input": "hi", "stream": True}))
+
+
+def texts(events, kind):
+    return "".join(e["delta"] for e in events if e["type"] == kind)
+
+
+@pytest.mark.parametrize("chunks,plain_text", [
+    (("</think>", CALL, "\nI have asked for the weather."), "I have asked for the weather."),
+    (("</think>Before. ", CALL, " After the call."), "Before.  After the call."),
+    (("</think> \n", CALL), None),
+])
+def test_text_around_a_call_is_streamed_as_the_plain_response_has_it(model, chunks, plain_text):
+    model(*chunks)
+    plain = client.post("/v1/responses", json={"input": "hi"}).json()["output"]
+    assert [o["content"][0]["text"] for o in plain if o["type"] == "message"] == (
+        [plain_text] if plain_text else [])
+
+    events = responses_stream()
+    final = [e for e in events if e["type"] == "response.completed"][0]["response"]["output"]
+    assert [(o["type"], o.get("content")) for o in final] == [
+        (o["type"], o.get("content")) for o in plain]
+    assert texts(events, "response.output_text.delta").split() == (plain_text or "").split()
+    added = [e["item"]["type"] for e in events if e["type"] == "response.output_item.added"]
+    assert added == (["message"] if plain_text else [])
+
+    events = anthropic_stream()
+    text = "".join(e["delta"].get("text", "") for e in events if e["type"] == "content_block_delta")
+    assert text.split() == (plain_text or "").split()
+    starts = [e["content_block"]["type"] for e in events if e["type"] == "content_block_start"]
+    assert starts == (["text", "tool_use"] if plain_text else ["tool_use"])
+
+
+@pytest.mark.parametrize("split", range(1, len("<tool_call>")))
+def test_a_marker_split_across_chunks_never_reaches_the_stream(model, split):
+    marker, rest = CALL[:split], CALL[split:]
+    model("</think>Checking. " + marker, rest)
+    assert texts(responses_stream(), "response.output_text.delta") == "Checking. "
+    events = anthropic_stream()
+    assert "".join(e["delta"].get("text", "") for e in events
+                   if e["type"] == "content_block_delta") == "Checking. "
+
+
+def test_text_that_only_looks_like_a_marker_is_delivered(model):
+    model("</think>Use the <tool", "_box> now.")
+    assert texts(responses_stream(), "response.output_text.delta") == "Use the <tool_box> now."
+
+
+@pytest.mark.parametrize("raw", [("\n\n</think>\n\nHello.",), ("  ", "\n</think>Hello.")])
+def test_an_empty_think_block_is_not_reasoning(model, raw):
+    model(*raw)
+    message = client.post("/v1/chat/completions", json={"messages": HI}).json()["choices"][0]["message"]
+    assert "reasoning_content" not in message and message["content"] == "Hello."
+    deltas = [e["choices"][0]["delta"] for e in sse(client.post(
+        "/v1/chat/completions", json={"messages": HI, "stream": True})) if e.get("choices")]
+    assert not any("reasoning_content" in d for d in deltas)
+
+    plain = client.post("/v1/messages", json={"messages": HI, "max_tokens": 50}).json()
+    assert [b["type"] for b in plain["content"]] == ["text"]
+    starts = [e["content_block"]["type"] for e in anthropic_stream()
+              if e["type"] == "content_block_start"]
+    assert starts == ["text"]
+
+    assert [o["type"] for o in client.post("/v1/responses", json={"input": "hi"}).json()["output"]] == ["message"]
+    added = [e["item"]["type"] for e in responses_stream() if e["type"] == "response.output_item.added"]
+    assert added == ["message"]
+
+
+def test_reasoning_that_starts_with_blank_lines_is_kept_whole(model):
+    model("\n", "\nWhy.</think>Hi.")
+    events = responses_stream()
+    assert texts(events, "response.reasoning_text.delta") == "\n\nWhy."
+    message = client.post("/v1/chat/completions", json={"messages": HI}).json()["choices"][0]["message"]
+    assert message["reasoning_content"] == "\n\nWhy."
+
+
+def test_responses_stream_events_all_point_at_their_item(model):
+    model(*TOOL)
+    events = responses_stream()
+    added = {e["item"]["type"]: (e["item"]["id"], e["output_index"])
+             for e in events if e["type"] == "response.output_item.added"}
+    assert added["reasoning"][1] == 0 and added["message"][1] == 1
+    assert [e["item"]["status"] for e in events if e["type"] == "response.output_item.added"] == [
+        "in_progress", "in_progress"]
+    per_item = {
+        "reasoning": ["response.content_part.added", "response.reasoning_text.delta",
+                      "response.reasoning_text.done", "response.content_part.done"],
+        "message": ["response.content_part.added", "response.output_text.delta",
+                    "response.output_text.done", "response.content_part.done"],
+    }
+    for kind, wanted in per_item.items():
+        mine = [e for e in events if e.get("item_id") == added[kind][0]]
+        assert [e["type"] for e in mine if "delta" not in e["type"]] == [
+            w for w in wanted if "delta" not in w]
+        assert wanted[1] in [e["type"] for e in mine]
+        assert {e["output_index"] for e in mine} == {added[kind][1]}
+        assert {e["content_index"] for e in mine} == {0}
+    done = {e["type"]: e for e in events}
+    assert done["response.reasoning_text.done"]["text"] == "Need weather."
+    assert done["response.output_text.done"]["text"] == "Checking."
+    parts = [e["part"] for e in events if e["type"] == "response.content_part.done"]
+    assert parts == [{"type": "reasoning_text", "text": "Need weather."},
+                     {"type": "output_text", "text": "Checking.", "annotations": []}]
+    finished = [e for e in events if e["type"] == "response.output_item.done"]
+    assert [e["output_index"] for e in finished] == [0, 1, 2]
+    assert finished[0]["item"] == {"id": added["reasoning"][0], "type": "reasoning",
+                                   "status": "completed", "summary": [],
+                                   "content": [{"type": "reasoning_text", "text": "Need weather."}]}
+    assert finished[1]["item"]["status"] == "completed"
+
+
+def test_anthropic_thinking_events_have_the_documented_shape(model):
+    model(*ANSWER)
+    events = anthropic_stream()
+    start = [e for e in events if e["type"] == "content_block_start"][0]
+    assert start["content_block"] == {"type": "thinking", "thinking": "", "signature": ""}
+    deltas = [e["delta"] for e in events if e["type"] == "content_block_delta" and e["index"] == 0]
+    assert {d["type"] for d in deltas} == {"thinking_delta", "signature_delta"}
+    assert deltas[-1]["type"] == "signature_delta"
+
+
+def test_phases_within_one_chunk_keep_their_order(monkeypatch):
+    # text then reasoning in a single chunk: only phase_deltas knows the order
+    monkeypatch.setattr(serve_app, "submit", lambda *_a: generated(
+        "Before.<think>why</think>", "After.", parser=ReasoningParser()))
+    starts = [e["content_block"]["type"] for e in anthropic_stream()
+              if e["type"] == "content_block_start"]
+    assert starts == ["text", "thinking", "text"]
+
+
+def private_text(monkeypatch, *chunks):
+    from mlxh.engine import Job
+
+    class Engine:
+        model_id = "m"
+
+        def submit(self, request):
+            job = Job(request, queue.Queue())
+            for chunk in chunks:
+                job.out.put(NS(text=chunk, reasoning_text=""))
+            job.out.put(GenerationTerminal("stop", "completed", 1, 1, 0.1, 1.0))
+            job.out.put(None)
+            return job
+
+        def cancel(self, _request_id):
+            return True
+
+    monkeypatch.setattr(serve_app, "engine", Engine())
+    response = client.post("/mlxh/generate", json={"messages": HI})
+    events = [json.loads(line[6:]) for line in response.text.splitlines()
+              if line.startswith("data: {")]
+    return "".join(e["text"] for e in events if set(e) == {"text"})
+
+
+def test_chat_transport_loses_no_text_after_leading_whitespace(monkeypatch):
+    assert private_text(monkeypatch, "  \n", "Hello world, this is", " it") == "  \nHello world, this is it"
+    assert private_text(monkeypatch, "Before. ", CALL, " After.") == "Before.  After."

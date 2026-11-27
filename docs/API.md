@@ -78,8 +78,8 @@ not enforced (the model decides).
 
 Streaming is standard SSE `chat.completion.chunk` events ending with
 `data: [DONE]`; the final chunk carries `usage`. When `tools` are present the
-output is buffered and delivered once parseable (tool-call XML must be read
-whole). Comment lines (`: ping`) are emitted every 15s while the model is
+answer is buffered and delivered once parseable (tool-call XML must be read
+whole); reasoning still streams as it is generated. Comment lines (`: ping`) are emitted every 15s while the model is
 still processing the prompt — SSE-legal, ignored by clients.
 
 ```bash
@@ -156,11 +156,12 @@ The OpenAI Responses API subset Codex needs. Honored: `instructions`,
 `stream`, `reasoning.effort` (same values as `reasoning_effort`).
 Reasoning items are skipped.
 
-Output items are `message` (with `output_text` content) and
-`function_call`. Streaming follows the Responses event protocol:
-`response.created`, `response.output_item.added`,
-`response.content_part.added`, `response.output_text.delta` / `.done`,
-`response.content_part.done`, `response.output_item.done`,
+Output items are `reasoning` (with `reasoning_text` content, when the model
+reasoned), `message` (with `output_text` content) and `function_call`.
+Streaming follows the Responses event protocol: `response.created`,
+`response.output_item.added`, `response.content_part.added`,
+`response.reasoning_text.delta` / `.done`, `response.output_text.delta` /
+`.done`, `response.content_part.done`, `response.output_item.done`,
 `response.completed` — with `: ping` comment keepalives during prompt
 processing, and `response.failed` on errors.
 
@@ -200,13 +201,15 @@ content blocks (`text`, `image` base64 source, `tool_use`, `tool_result`),
 System-role messages appearing mid-conversation (agent
 "system reminders") are demoted to user messages rather than rejected.
 
-Responses are Anthropic message objects: `content` blocks (`text`,
-`tool_use`), `stop_reason` (`end_turn` / `max_tokens` / `tool_use`), `usage`
-with `input_tokens`/`output_tokens`.
+Responses are Anthropic message objects: `content` blocks (`thinking`,
+`text`, `tool_use`), `stop_reason` (`end_turn` / `max_tokens` / `tool_use`),
+`usage` with `input_tokens`/`output_tokens` and `cache_read_input_tokens`
+(prompt tokens the prefix cache supplied, not counted in `input_tokens`).
 
 Streaming follows the Anthropic event protocol: `message_start` (emitted
 immediately), `content_block_start` / `content_block_delta`
-(`text_delta`, `input_json_delta`) / `content_block_stop`, `message_delta`
+(`thinking_delta`, `signature_delta`, `text_delta`, `input_json_delta`) /
+`content_block_stop`, `message_delta`
 (with `stop_reason` and usage), `message_stop` — with `ping` events every
 15s during prompt processing so agent clients don't mistake a slow model for
 a dead network. Errors mid-stream arrive as an `error` event.
