@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.2.4 — 2026-11-27
+
 - **Prompt limit per model**: the fixed 8192-token cap is gone. Each model
   now gets its own limit when it loads: its context length, or the prompt
   its cache can hold in the memory left under `memory_limit_gb`, whichever
