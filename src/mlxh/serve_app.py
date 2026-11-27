@@ -120,7 +120,7 @@ SETTINGS = {
     "memory_limit_gb": 0.0,   # MLX unified-memory limit; 0 = auto (80% of RAM), -1 = off
     "cache_limit_gb": 0.0,    # MLX buffer-cache limit; 0 = off
     "gen_timeout_s": 600,     # hard stop for one generation; 0 = off
-    "max_prompt_tokens": 8192,  # reject bigger prompts (KV cache = memory); 0 = off
+    "max_prompt_tokens": 0,  # reject bigger prompts: 0 = each model's own limit, -1 = off
     "prompt_cache": True,   # reuse KV blocks across requests (agents: huge TTFT win)
     "prompt_cache_gb": 0.0,  # text prefix-cache cap; 0 = auto (25% of memory limit)
     "thinking": "auto",     # reasoning mode: auto (model default) / on / off

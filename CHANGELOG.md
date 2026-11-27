@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **Prompt limit per model**: the fixed 8192-token cap is gone. Each model
+  now gets its own limit when it loads: its context length, or the prompt
+  its cache can hold in the memory left under `memory_limit_gb`, whichever
+  is smaller. What a token costs is read off the model's real cache, so
+  models that keep most layers in a sliding window (Inkling 2, Gemma 4) get
+  the room they actually have. The 400 for an oversized prompt says which of
+  the two applied; `mlxh status` and `/mlxh/info` (`prompt_cap`) show the
+  limit. `max_prompt_tokens` now means 0 = per model (the default), N = that
+  limit for every model, -1 = off. Existing config files are read as they
+  were meant: a stored 8192 (the old default, which every saved file
+  carries) becomes per model, a stored 0 (the old "off") becomes -1, and any
+  other value stays the limit for every model. `--max-prompt-tokens 0` on
+  the command line now means per model, not off. A long prompt also takes
+  time, and `gen_timeout_s` only stops a generation between tokens.
+
 ## v0.2.3 — 2026-11-27
 
 - **Prompt cache across agent turns**: a cache that cannot be trimmed

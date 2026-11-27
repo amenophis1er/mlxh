@@ -14,6 +14,7 @@ import time
 import warnings
 from pathlib import Path
 
+from .prompt_cap import cache_growth
 from .toolcalls import QWEN_XML, detect_format
 
 # Must be set before transformers is first imported: silences import-time
@@ -23,6 +24,16 @@ os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 # Gemma-style audio towers trip a harmless mel-filter warning while their
 # (unused) audio preprocessor initializes; keep startup clean.
 warnings.filterwarnings("ignore", message=".*mel filter.*", category=UserWarning)
+
+
+def _probe_cache(language_model, make_prompt_cache):
+    """How this model's prompt cache grows, read off a real one after a
+    two-token pass: (bytes per further token, fixed bytes)."""
+    import mlx.core as mx
+    cache = make_prompt_cache(language_model)
+    language_model(mx.array([[1, 1]]), cache=cache)
+    mx.eval([layer.state for layer in cache])
+    return cache_growth(cache)
 
 
 class VLMRunner:
@@ -42,8 +53,19 @@ class VLMRunner:
         """
         from mlx_vlm.apc import APCManager
         self.apc = APCManager(num_blocks=num_blocks, block_size=block_size)
+        self._pool_tokens = num_blocks * block_size
         return (f"[apc] prompt cache enabled ({num_blocks * block_size // 1000}k-token "
                 "block pool; prompt_cache_gb does not apply to mlx-vlm models)")
+
+    def prompt_cost(self):
+        """What a prompt token costs in memory (see prompt_cap.memory_tokens).
+        With the block pool on, a request holds its cache and the copy the
+        pool keeps, and the pool itself is set aside."""
+        from mlx_vlm.models.cache import make_prompt_cache
+        per_token, fixed = _probe_cache(self.model.language_model, make_prompt_cache)
+        pooled = self._pool_tokens if self.apc is not None else 0
+        return {"per_token": per_token, "fixed": fixed, "copies": 2 if pooled else 1,
+                "reserve": pooled * per_token}
 
     def template(self, messages, num_images=0, tools=None, thinking=None, effort=None):
         from mlx_vlm.prompt_utils import apply_chat_template
@@ -100,6 +122,17 @@ class TextRunner:
         self.prompt_cache = LRUPromptCache(max_size=max_entries, max_bytes=int(max_bytes))
         self._cache_key = "model"  # trie key; nn.Module itself is not hashable
         return f"[cache] prefix cache enabled (cap {max_bytes / 1e9:.1f} GB, prompt_cache_gb overrides)"
+
+    def prompt_cost(self):
+        """What a prompt token costs in memory (see prompt_cap.memory_tokens).
+        With the prefix cache on, a request holds its cache and one copy (the
+        snapshot, or the entry it started from), and the cache's byte cap is
+        set aside for what is already stored."""
+        from mlx_lm.models.cache import make_prompt_cache
+        per_token, fixed = _probe_cache(self.model, make_prompt_cache)
+        cached = self.prompt_cache is not None
+        return {"per_token": per_token, "fixed": fixed, "copies": 2 if cached else 1,
+                "reserve": self.prompt_cache.max_bytes if cached else 0}
 
     def cache_stats(self):
         if self.prompt_cache is None:

@@ -464,3 +464,34 @@ def test_chat_reuses_model_manager_without_pinning(monkeypatch):
     )
     assert info["manager"] is True
     assert started is None
+
+
+@pytest.mark.parametrize("stored,expected", [
+    ({"port": 1061, "max_prompt_tokens": 8192}, 0),      # the old default every saved file carried
+    ({"max_prompt_tokens": 0}, -1),                      # 0 used to mean off
+    ({"max_prompt_tokens": 32768}, 32768),               # a choice stays a choice
+    ({"port": 1061}, 0),
+    ({"config_version": 2, "max_prompt_tokens": 8192}, 8192),  # chosen after the change
+    ({"config_version": 2, "max_prompt_tokens": 0}, 0),
+])
+def test_prompt_cap_setting_is_read_as_the_version_that_wrote_it_meant(tmp_path, monkeypatch, stored, expected):
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps(stored))
+    monkeypatch.setattr(cli, "CONFIG", config)
+    cfg = cli.load_config()
+    assert cfg["max_prompt_tokens"] == expected
+    assert "config_version" not in cfg
+
+
+def test_saving_marks_the_config_so_a_later_8192_is_kept(tmp_path, monkeypatch):
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({**cli.DEFAULTS, "max_prompt_tokens": 8192, "port": 1061}))
+    monkeypatch.setattr(cli, "CONFIG", config)
+    monkeypatch.setattr(cli, "HOME", tmp_path)
+    cli.cmd_config(NS(key="thinking", value="off"))      # any save migrates the file
+    assert json.loads(config.read_text())["max_prompt_tokens"] == 0
+    assert json.loads(config.read_text())["config_version"] == cli.CONFIG_VERSION
+    cli.cmd_config(NS(key="max_prompt_tokens", value="8192"))
+    assert cli.load_config()["max_prompt_tokens"] == 8192
+    cli.cmd_config(NS(key="max_prompt_tokens", value="-1"))
+    assert cli.load_config()["max_prompt_tokens"] == -1

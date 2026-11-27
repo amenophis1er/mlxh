@@ -33,7 +33,8 @@ Config keys (mlxh config <key> <value>):
   memory_limit_gb     MLX memory limit, 0 = auto (80% RAM), -1 = off
   cache_limit_gb      MLX buffer-cache limit, 0 = off
   gen_timeout_s       hard stop for one generation, 0 = off (600)
-  max_prompt_tokens   reject prompts bigger than this, 0 = off (8192)
+  max_prompt_tokens   reject prompts bigger than this; 0 = each model's own limit
+                      (its context length, or what memory allows), -1 = off (0)
   prompt_cache        reuse KV blocks across requests (true)
   prompt_cache_gb     text prefix-cache cap in GB, 0 = auto (25% of memory limit)
   thinking            model reasoning: auto / on / off (auto)
@@ -77,7 +78,7 @@ DEFAULTS = {
     "memory_limit_gb": 0.0,
     "cache_limit_gb": 0.0,
     "gen_timeout_s": 600,
-    "max_prompt_tokens": 8192,
+    "max_prompt_tokens": 0,
     "prompt_cache": True,
     "prompt_cache_gb": 0.0,
     "thinking": "auto",
@@ -115,12 +116,28 @@ KEY_TYPES = {
 SERVICE_LABEL = "com.mlxh.serve"
 
 
+CONFIG_VERSION = 2
+
+
+def _migrate(stored):
+    """Read a config file an older mlxh wrote as this one means it."""
+    if stored.pop("config_version", 1) < 2:
+        # Every saved file carries all the defaults of its day, so the old
+        # prompt cap (8192) is not a choice; and 0 used to mean "off", which
+        # is -1 now that 0 is each model's own limit.
+        old = stored.get("max_prompt_tokens")
+        if old == 8192:
+            del stored["max_prompt_tokens"]
+        elif old == 0:
+            stored["max_prompt_tokens"] = -1
+    stored.pop("models", None)  # registry from pre-0.2 layouts; now unused
+    return stored
+
+
 def load_config(validate=True):
     cfg = dict(DEFAULTS)
     if CONFIG.exists():
-        stored = json.loads(CONFIG.read_text())
-        stored.pop("models", None)  # registry from pre-0.2 layouts; now unused
-        cfg.update(stored)
+        cfg.update(_migrate(json.loads(CONFIG.read_text())))
     if not validate:
         return cfg
     try:
@@ -134,7 +151,7 @@ def load_config(validate=True):
 
 def save_config(cfg):
     HOME.mkdir(parents=True, exist_ok=True)
-    CONFIG.write_text(json.dumps(cfg, indent=2))
+    CONFIG.write_text(json.dumps({**cfg, "config_version": CONFIG_VERSION}, indent=2))
 
 
 def models_dir(cfg):
@@ -276,6 +293,14 @@ def _format_prompt_cache(stats):
         return "—"
     return (f"{stats['entries']} seq {_format_gb(stats['bytes'])}"
             f" ({stats['hits']} hits)")
+
+
+def _format_prompt_cap(cap):
+    if not cap:
+        return "—"
+    if cap.get("tokens") is None:
+        return "no limit"
+    return f"{_format_tokens(cap['tokens'])} ({cap.get('source', '?')})"
 
 
 def total_ram_bytes():
@@ -658,7 +683,7 @@ def cmd_status(args):
             print("No model workers loaded. The first API request starts one.")
         else:
             headers = ["MODEL", "KIND", "PID", "STATE", "QUEUE", "ACTIVE",
-                       "REQ", "ACTIVE GB", "PROMPT CACHE", "IDLE UNLOAD IN"]
+                       "REQ", "ACTIVE GB", "PROMPT CACHE", "MAX PROMPT", "IDLE UNLOAD IN"]
             rows = [[w.get("model", "—"), w.get("model_kind") or "—",
                      str(w.get("pid") or "—"), str(w.get("state", "—")).upper(),
                      str(w.get("queue_depth") if w.get("queue_depth") is not None else "—"),
@@ -667,6 +692,7 @@ def cmd_status(args):
                      (_format_gb(w["active_memory_bytes"])
                       if w.get("active_memory_bytes") is not None else "—"),
                      _format_prompt_cache(w.get("prompt_cache")),
+                     _format_prompt_cap(w.get("prompt_cap")),
                      (f"{w['idle_expires_in_s']}s"
                       if w.get("idle_expires_in_s") is not None else "—")]
                     for w in workers]
@@ -701,12 +727,13 @@ def cmd_status(args):
         _human_value(mlx.get("cache_memory_bytes"), _format_gb),
         _human_value(mlx.get("last_peak_memory_bytes"), _format_gb),
         _format_prompt_cache(info.get("prompt_cache")),
+        _format_prompt_cap(info.get("prompt_cap")),
     ]
     headers = ["MODEL", "PID", "UPTIME", "STATE", "QUEUE", "REQ",
-               "PROMPT", "OUTPUT", "ACTIVE", "CACHE", "PEAK", "PREFIX CACHE"]
+               "PROMPT", "OUTPUT", "ACTIVE", "CACHE", "PEAK", "PREFIX CACHE", "MAX PROMPT"]
     if info.get("model_kind") == "image":
-        headers[6:8] = ["IMAGES"]
-        values[6:8] = [_human_value(runtime.get("images_generated"))]
+        headers[6:8], headers[-1:] = ["IMAGES"], []
+        values[6:8], values[-1:] = [_human_value(runtime.get("images_generated"))], []
     widths = [max(len(header), len(str(value)))
               for header, value in zip(headers, values)]
     print(ui.dim("  ".join(f"{header:{width}}"
@@ -1137,11 +1164,11 @@ def cmd_launch(args):
         ui.fail(f"'{args.agent}' is not installed",
                 hint="install it first, or use --dry-run to see the wiring")
     cap = cfg["max_prompt_tokens"]
-    if cap and cap < 32768 and not args.no_mcp:
+    if 0 < cap < 32768 and not args.no_mcp:
         ui.note(f"note: coding agents send ~30k-token prompts (more with MCP servers); "
                 f"max_prompt_tokens={cap} will reject them. Raise with "
-                f"`mlxh config max_prompt_tokens 40960`, or shrink the prompt with "
-                f"`--no-mcp` (claude only).")
+                f"`mlxh config max_prompt_tokens 40960` (0 = each model's own limit), "
+                f"or shrink the prompt with `--no-mcp` (claude only).")
     ui.step(f"launching {args.agent} against {name}")
     try:
         proc = subprocess.run([args.agent, *agent_args, *args.rest],

@@ -182,6 +182,7 @@ class ModelWorkers:
             "cache_memory_bytes": mlx.get("cache_memory_bytes"),
             "peak_memory_bytes": mlx.get("last_peak_memory_bytes"),
             "prompt_cache": info.get("prompt_cache"),
+            "prompt_cap": info.get("prompt_cap"),
         }
 
     def _reaper_loop(self):

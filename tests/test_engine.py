@@ -16,7 +16,7 @@ from mlxh.engine import (
 
 SETTINGS = {
     "max_queued": 4, "max_tokens_cap": 100, "memory_limit_gb": -1,
-    "cache_limit_gb": 0, "gen_timeout_s": 0, "max_prompt_tokens": 0,
+    "cache_limit_gb": 0, "gen_timeout_s": 0, "max_prompt_tokens": -1,
     "prompt_cache": False, "thinking": "auto",
 }
 

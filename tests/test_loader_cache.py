@@ -418,3 +418,31 @@ def test_cache_disabled_passes_prompt_through_untouched(monkeypatch):
     out = run(r, [1, 2, 3])
     assert r.cache_stats() is None
     assert out[0].cached_tokens == 0 and out[0].prompt_tokens == 3
+
+
+# --- what a prompt token costs (prompt_cap) -------------------------------
+
+class Layered:
+    """A model whose cache mixes global, windowed and stateful layers, as
+    Inkling 2 and the Qwen 3.5 hybrids do."""
+
+    def make_cache(self):
+        return [cache_mod.KVCache(), cache_mod.KVCache(),
+                cache_mod.RotatingKVCache(max_size=1024), cache_mod.ArraysCache(2)]
+
+    def __call__(self, inputs, cache):
+        import mlx.core as mx
+        tokens = inputs.shape[1]
+        for layer in cache[:3]:  # 4 kv heads of 16 dims, float16: 256 bytes a position
+            layer.update_and_fetch(mx.zeros((1, 4, tokens, 16), mx.float16),
+                                   mx.zeros((1, 4, tokens, 16), mx.float16))
+        cache[3][0] = mx.zeros((1, 100), mx.float16)
+
+
+def test_prompt_cost_reads_growth_off_the_models_real_cache():
+    runner = TextRunner(Layered(), Tokenizer())
+    assert runner.prompt_cost() == {"per_token": 2 * 256, "fixed": 1024 * 256 + 200,
+                                    "copies": 1, "reserve": 0}
+    runner.enable_cache(max_bytes=5 * 10**9)
+    cost = runner.prompt_cost()
+    assert (cost["copies"], cost["reserve"], cost["per_token"]) == (2, 5 * 10**9, 2 * 256)

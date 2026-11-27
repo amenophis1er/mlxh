@@ -21,6 +21,7 @@ from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from .images import ImageEditRequest, ImageGenerationRequest
 
+from . import prompt_cap
 from .loader import load_runner
 from .toolcalls import QWEN_XML
 
@@ -143,6 +144,7 @@ class EngineLifecycle:
         self.settings = settings
         self.exit_on_load_failure = exit_on_load_failure
         self.runner = None
+        self.prompt_cap = None  # set once the model is loaded
         self.memory_limit_bytes = self._resolve_memory_limit()
         self.jobs: queue.Queue[Job] = queue.Queue()
         self.ready = threading.Event()
@@ -257,6 +259,8 @@ class InferenceEngine(EngineLifecycle):
             if (self.settings["prompt_cache"]
                     and getattr(self.runner, "supports_cache", False)):
                 self._enable_prompt_cache()
+            self.prompt_cap = self._resolve_prompt_cap(mx)
+            print(f"[prompt] limit {self.prompt_cap.describe()}", flush=True)
             try:
                 self._set("last_peak_memory_bytes", int(mx.get_peak_memory()))
                 mx.reset_peak_memory()
@@ -363,6 +367,24 @@ class InferenceEngine(EngineLifecycle):
         ram = total_ram_bytes()
         return int(ram * 0.2) if ram else 8 * 10**9
 
+    def _resolve_prompt_cap(self, mx):
+        """This model's prompt limit (see prompt_cap). Measuring what a token
+        costs must never stop a model from loading: without it the limit is
+        the context length alone."""
+        setting = self.settings["max_prompt_tokens"]
+        if setting:
+            return prompt_cap.resolve(setting)
+        from .cli import total_ram_bytes
+        cost = None
+        try:
+            cost = self.runner.prompt_cost()
+        except Exception as exc:
+            print(f"[prompt] could not measure the cache: {exc}", flush=True)
+        limit = self.memory_limit_bytes or int((total_ram_bytes() or 0) * 0.8)
+        return prompt_cap.resolve(
+            0, prompt_cap.context_length(self.model_path),
+            prompt_cap.memory_tokens(limit, int(mx.get_active_memory()), cost))
+
     def _enable_prompt_cache(self):
         banner = self.runner.enable_cache(self._prompt_cache_bytes())
         if banner:
@@ -457,17 +479,17 @@ class InferenceEngine(EngineLifecycle):
         reasoning_parser = own_parser() if own_parser else ReasoningParser(
             isinstance(prompt, str) and prompt.rstrip().endswith("<think>")
         )
-        cap = self.settings["max_prompt_tokens"]
-        if cap:
+        cap = self.prompt_cap or prompt_cap.resolve(self.settings["max_prompt_tokens"])
+        if cap.tokens:
             n_prompt = len(prompt) if isinstance(prompt, (list, tuple)) else len(prompt) // 4
-            if n_prompt > cap:
+            if n_prompt > cap.tokens:
                 raise EngineError(
                     400,
-                    f"prompt is ~{n_prompt} tokens, over max_prompt_tokens={cap}. "
-                    "Long contexts grow the KV cache and can exhaust unified memory. "
-                    f"Raise deliberately: `mlxh config max_prompt_tokens "
-                    f"{min(65536, max(cap * 2, n_prompt + 4096))}` "
-                    "(or serve --max-prompt-tokens N).",
+                    f"prompt is ~{n_prompt:,} tokens, over this model's limit of "
+                    f"{cap.describe()}. Long prompts grow the KV cache and can exhaust "
+                    "unified memory. To override for every model: `mlxh config "
+                    f"max_prompt_tokens {n_prompt + 4096}` (-1 = no limit; or serve "
+                    "--max-prompt-tokens N), then restart the server.",
                 )
         print(f"[gen] start: {len(messages)} msgs, {len(images)} images, "
               f"{len(request.tools or [])} tools, max_tokens={max_tokens}"
@@ -545,6 +567,7 @@ class InferenceEngine(EngineLifecycle):
             "mlx": mlx_stats,
             "prompt_cache": (self.runner.cache_stats()
                              if getattr(self.runner, "cache_stats", None) else None),
+            "prompt_cap": self.prompt_cap.as_dict() if self.prompt_cap else None,
             "runtime": {
                 "engine_version": 1,
                 "uptime_s": int(time.monotonic() - self.started),

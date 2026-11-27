@@ -94,7 +94,7 @@ Set persistently with `mlxh config <key> <value>`, or per run with
 | `memory_limit_gb` | 0 = auto | MLX memory limit; auto caps at 80% of RAM, -1 disables |
 | `cache_limit_gb` | 0 (off) | MLX buffer-cache limit (frees memory between requests) |
 | `gen_timeout_s` | 600 | hard stop for a single generation (0 = off) |
-| `max_prompt_tokens` | 8192 | reject larger prompts with a 400 (0 = off) |
+| `max_prompt_tokens` | 0 | reject larger prompts with a 400: 0 = each model's own limit (its context length, or what memory allows), N = the same limit for every model, -1 = off |
 | `prompt_cache` | true | reuse KV blocks across requests — same-prefix follow-ups skip reprocessing (agents: 4-20x faster TTFT) |
 | `prompt_cache_gb` | 0 | byte cap for the text-model prefix cache (LRU); 0 = auto: 25% of the memory limit, or 20% of RAM when no limit is set |
 | `thinking` | auto | model reasoning: `auto` (model default), `on`, `off` |
@@ -127,10 +127,15 @@ LaunchAgents start at login rather than before login, and append unrotated
 manager output to `~/.mlxh/service.log`; worker logs are in `~/.mlxh/workers/`.
 
 The last two exist because long contexts are a real hazard on unified memory:
-KV cache grows with prompt length, and an unbounded 30k-token request can
-exhaust RAM and freeze the whole machine. The server fails a request rather
-than take the machine down; raise the limits deliberately when you have the
-headroom (coding agents need `max_prompt_tokens` around 40960).
+KV cache grows with prompt length, and an unbounded request can exhaust RAM
+and freeze the whole machine. The server fails a request rather than take
+the machine down. Each model's prompt limit is worked out when it loads,
+from its context length and from what one token costs in its cache against
+the memory left under `memory_limit_gb`; `mlxh status` shows it. The
+estimate is per worker: several resident models share the same RAM. A long
+prompt also takes time (Inkling 2 Mini: 37 s for 32k tokens, over 6 minutes
+for 128k on an M-series 64 GB machine), and `gen_timeout_s` only stops a
+generation between tokens, so raise it for prompts that long.
 
 Each model worker retains its existing serial queue. Different model workers
 are independent processes and may infer concurrently; they share Apple Silicon

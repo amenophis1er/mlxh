@@ -110,3 +110,22 @@ def test_manager_status_shows_each_workers_prompt_cache(monkeypatch, capsys):
     cli.cmd_status(NS(json=False))
     out = capsys.readouterr().out
     assert "PROMPT CACHE" in out and "3 seq 0.4 GB (5 hits)" in out
+
+
+def test_status_shows_each_models_prompt_limit(monkeypatch, capsys):
+    worker = {"model": "inkling2-mini", "state": "idle",
+              "prompt_cap": {"tokens": 267000, "source": "memory"}}
+    payload = {"manager": True, "workers": [
+        worker, {**worker, "model": "qwen05", "prompt_cap": {"tokens": 32768, "source": "context"}},
+        {**worker, "model": "free", "prompt_cap": {"tokens": None, "source": "off"}},
+        {**worker, "model": "old", "prompt_cap": None}]}
+    monkeypatch.setattr(cli, "_fetch_info", lambda _port: payload)
+    cli.cmd_status(NS(json=False))
+    out = capsys.readouterr().out
+    for value in ("MAX PROMPT", "267k (memory)", "32.8k (context)", "no limit"):
+        assert value in out
+
+    monkeypatch.setattr(cli, "_fetch_info", lambda _port: {
+        **PAYLOAD, "prompt_cap": {"tokens": 40960, "source": "setting"}})
+    cli.cmd_status(NS(json=False))
+    assert "41.0k (setting)" in capsys.readouterr().out
