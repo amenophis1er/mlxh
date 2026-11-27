@@ -103,7 +103,7 @@ def content_blocks(text, tool_calls):
 def usage_of(prompt_tokens, output_tokens, cached_tokens=0):
     # Anthropic counts cache reads apart from input_tokens.
     return {"input_tokens": prompt_tokens - cached_tokens, "output_tokens": output_tokens,
-            "cache_read_input_tokens": cached_tokens}
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": cached_tokens}
 
 
 def message_response(model_id, text, tool_calls, prompt_tokens, output_tokens, finish_reason,

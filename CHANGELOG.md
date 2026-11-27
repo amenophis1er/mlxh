@@ -4,16 +4,19 @@
 
 - **Prompt cache across agent turns**: a cache that cannot be trimmed
   (Inkling 2, Qwen 3.5-style hybrids loaded through mlx-lm) is also kept as
-  it stood at the end of each prompt, so the next turn reuses the whole
-  conversation up to its new message even though clients send the history
-  back without the model's reasoning. A conversation's newer snapshot
-  replaces its older one and the reply that history dropped, so the cap is
-  not charged twice for the same turns. Trimmable caches are unchanged.
+  it stood at the end of each prompt, so the next turn reuses everything up
+  to the end of the previous prompt even though clients send the history
+  back without the model's reasoning. A conversation keeps its two latest
+  snapshots and its latest reply; older ones and the replies its history
+  dropped are removed, so the cap is not charged again for the same turns,
+  and a side request that forks the history does not cost the next turn its
+  cache. `prompt_cache_gb` counts stored entries; a request in flight holds
+  up to two more copies of its own context. Trimmable caches are unchanged.
 - **Cached tokens in usage**: `prompt_tokens_details.cached_tokens` on chat
   completions, `input_tokens_details.cached_tokens` on Responses, and
   `cache_read_input_tokens` on Anthropic messages (whose `input_tokens` now
-  leaves them out, as Anthropic's does). `mlxh status` shows each resident
-  worker's prompt cache.
+  leaves them out, as Anthropic's does; `cache_creation_input_tokens` is
+  always 0). `mlxh status` shows each resident worker's prompt cache.
 
 ## v0.2.2 — 2026-11-25
 

@@ -62,6 +62,7 @@ def test_message_response_with_tool_call():
     assert tool["type"] == "tool_use" and tool["id"].startswith("toolu_")
     assert tool["input"] == {"x": 1}
     assert resp["usage"] == {"input_tokens": 10, "output_tokens": 5,
+                             "cache_creation_input_tokens": 0,
                              "cache_read_input_tokens": 0}
 
 

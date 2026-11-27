@@ -1,6 +1,7 @@
 import queue
 from types import SimpleNamespace as NS
 
+import pytest
 from fastapi.testclient import TestClient
 
 from mlxh import serve_app
@@ -141,12 +142,42 @@ def test_usage_reports_prompt_tokens_the_cache_supplied(monkeypatch):
         "model": "m", "max_tokens": 5,
         "messages": [{"role": "user", "content": "hi"}]}).json()
     assert message["usage"] == {"input_tokens": 20, "output_tokens": 2,
+                                "cache_creation_input_tokens": 0,
                                 "cache_read_input_tokens": 30}
 
     stream = client.post("/v1/messages", json={
         "model": "m", "max_tokens": 5, "stream": True,
         "messages": [{"role": "user", "content": "hi"}]}).text
     assert '"cache_read_input_tokens": 30' in stream
+
+    stream = client.post("/v1/responses", json={"input": "hi", "stream": True}).text
+    assert '"input_tokens_details": {"cached_tokens": 30}' in stream
+
+    stream = client.post("/v1/chat/completions", json={"messages": [], "stream": True}).text
+    assert '"prompt_tokens_details": {"cached_tokens": 30}' in stream
+
+
+def test_engine_carries_cached_tokens_into_the_terminal(monkeypatch):
+    pytest.importorskip("mlx.core", reason="the engine thread configures MLX")
+    from mlxh import engine as engine_mod
+
+    class Runner:
+        supports_images = False
+
+        def template(self, messages, **_kw):
+            return [1, 2, 3]
+
+        def stream(self, prompt, **_kw):
+            yield NS(text="hi", token=7, prompt_tokens=50, generation_tokens=1,
+                     generation_tps=9.0, cached_tokens=30, finish_reason="stop")
+
+    monkeypatch.setattr(engine_mod, "load_runner", lambda _path: Runner())
+    engine = InferenceEngine("/unused", "m", dict(SETTINGS), exit_on_load_failure=False)
+    engine.start()
+    out = engine.submit(GenerationRequest([{"role": "user", "content": "hi"}], "openai")).out
+    items = list(iter(lambda: out.get(timeout=30), None))
+    terminal = [i for i in items if isinstance(i, GenerationTerminal)][0]
+    assert (terminal.prompt_tokens, terminal.cached_tokens) == (50, 30)
 
 
 def test_prompt_cache_cap_follows_setting_then_memory_limit(monkeypatch):

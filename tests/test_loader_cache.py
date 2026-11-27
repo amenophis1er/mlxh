@@ -171,12 +171,46 @@ def test_non_trimmable_next_turn_reuses_the_prompt_when_the_reply_is_rerendered(
     out = run(linear, [1, 2, 3, 4, 50, 51, 5, 6, 52, 7, 8])
     assert out[0].cached_tokens == 7
     assert fake_stream_generate.calls[-1] == [8]
-    # Earlier snapshots and the replies the history dropped are not kept.
-    assert stored_keys(linear) == [[1, 2, 3, 4, 50, 51, 5, 6, 52, 7],
+    # Kept: the previous snapshot, this one and this reply. The first
+    # snapshot and the replies the history dropped are gone.
+    assert stored_keys(linear) == [[1, 2, 3, 4, 50, 51, 5],
+                                   [1, 2, 3, 4, 50, 51, 5, 6, 52, 7],
                                    [1, 2, 3, 4, 50, 51, 5, 6, 52, 7, 8, 100, 101]]
     stats = linear.cache_stats()
-    assert stats["entries"] == 2
-    assert stats["bytes"] == 2 * 1000 * (10 + 13)
+    assert stats["entries"] == 3
+    assert stats["bytes"] == 2 * 1000 * (7 + 10 + 13)
+    assert out[0].prompt_tokens == 11, "usage reports the whole prompt, not the last token"
+
+
+def test_non_trimmable_side_request_does_not_cost_the_next_turn_its_cache(linear):
+    run(linear, [1, 2, 3, 4])
+    # A client forks the history (a title, a suggestion) before the real turn.
+    side = run(linear, [1, 2, 3, 4, 50, 51, 30, 31])
+    assert side[0].cached_tokens == 3
+    out = run(linear, [1, 2, 3, 4, 50, 51, 5, 6])
+    assert out[0].cached_tokens == 3
+    assert linear.model.calls[-1] == [4, 50, 51, 5]
+    out = run(linear, [1, 2, 3, 4, 50, 51, 5, 6, 52, 7, 8])
+    assert out[0].cached_tokens == 7
+
+
+def test_snapshots_outlive_replies_under_the_caps(linear):
+    """mlx-lm evicts a reply before a snapshot of its own type "user": the
+    snapshot is the entry the next turn needs."""
+    run(linear, [1, 2, 3, 4])
+    kinds = {tuple(tokens): kind for kind, queue in linear.prompt_cache._lru._lrus.items()
+             for _, tokens in queue}
+    assert kinds == {(1, 2, 3): "user", (1, 2, 3, 4, 100, 101): "assistant"}
+    linear.prompt_cache.max_size = 1
+    linear.prompt_cache.insert_cache(linear._cache_key, [9, 9, 9],
+                                     cache_mod.make_prompt_cache(linear.model))
+    assert [1, 2, 3, 4, 100, 101] not in stored_keys(linear)
+
+
+def test_two_token_prompt_takes_no_snapshot_the_lru_would_never_return(linear):
+    run(linear, [1, 2])
+    assert stored_keys(linear) == [[1, 2, 100, 101]]
+    assert linear.model.calls == []
 
 
 def test_non_trimmable_reply_echoed_exactly_is_still_reused(linear):
@@ -234,6 +268,38 @@ def test_non_trimmable_failed_prefill_keeps_earlier_entries(linear, monkeypatch)
     with pytest.raises(RuntimeError):
         run(linear, [1, 2, 3, 4, 50, 5])
     assert stored_keys(linear) == [[1, 2, 3], [1, 2, 3, 4, 100, 101]]
+
+
+def test_non_trimmable_failed_follow_up_keeps_the_turn_before_it(linear, monkeypatch):
+    run(linear, [1, 2, 3, 4])
+    run(linear, [1, 2, 3, 4, 50, 51, 5, 6])
+    before = stored_keys(linear)
+
+    def exploding(model, tokenizer, prompt, max_tokens=1, **kwargs):
+        yield Resp(100, len(prompt))
+        raise RuntimeError("metal oom")
+
+    monkeypatch.setattr(mlx_lm, "stream_generate", exploding)
+    with pytest.raises(RuntimeError):  # fails after the prefill, when there is a snapshot to store
+        run(linear, [1, 2, 3, 4, 50, 51, 5, 6, 52, 7, 8])
+    assert stored_keys(linear) == before
+
+
+def test_snapshot_prefill_runs_under_mlx_lms_wired_limit(linear, monkeypatch):
+    import contextlib
+    import importlib
+    generate = importlib.import_module("mlx_lm.generate")  # mlx_lm.generate is the function
+    seen = []
+
+    @contextlib.contextmanager
+    def wired(model, streams=None):
+        seen.append("in")
+        yield
+        seen.append("out")
+
+    monkeypatch.setattr(generate, "wired_limit", wired)
+    linear._prefill_snapshot(cache_mod.make_prompt_cache(linear.model), [1, 2, 3])
+    assert seen == ["in", "out"] and linear.model.calls == [[1, 2, 3]]
 
 
 def test_non_trimmable_cancel_with_sound_cache_keeps_the_snapshot(linear):

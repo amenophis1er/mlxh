@@ -165,7 +165,7 @@ class TextRunner:
         snapshot, prefill_s = None, 0.0
         completed = False
         try:
-            if key is not None and self._wants_snapshot(cache, prompt):
+            if key is not None and self._wants_snapshot(cache, prompt, key):
                 started = time.perf_counter()
                 snapshot = (key[:-1], self._prefill_snapshot(cache, prompt[:-1]))
                 prefill_s = time.perf_counter() - started
@@ -199,21 +199,23 @@ class TextRunner:
                 self.prompt_cache.insert_cache(self._cache_key, *snapshot, cache_type="user")
 
     @staticmethod
-    def _wants_snapshot(cache, prompt):
+    def _wants_snapshot(cache, prompt, key):
         """A trimmable cache is cut back to any prefix of the final entry; one
         that cannot be (linear attention keeps a running state) is only reusable
         up to where it was stored. The next turn's history drops the reasoning,
-        so it shares the prompt with this one, not the reply."""
+        so it shares the prompt with this one, not the reply. The LRU never
+        returns a one-token entry, so a two-token prompt is not worth a copy."""
         from mlx_lm.models.cache import can_trim_prompt_cache
-        return len(prompt) > 1 and not can_trim_prompt_cache(cache)
+        return len(prompt) > 1 and len(key) > 2 and not can_trim_prompt_cache(cache)
 
     def _prefill_snapshot(self, cache, tokens, step=2048):
         """Process all but the last prompt token, as mlx_lm's generate_step
-        does (same chunks, same stream: a miss computes exactly what it would
-        uncached), and return a copy of the cache at that point."""
+        does (same chunks, same stream, same wired limit: a miss computes
+        exactly what it would uncached), and return a copy of the cache at
+        that point."""
         import mlx.core as mx
-        from mlx_lm.generate import generation_stream
-        with mx.stream(generation_stream):
+        from mlx_lm.generate import generation_stream, wired_limit
+        with wired_limit(self.model, [generation_stream]), mx.stream(generation_stream):
             for start in range(0, len(tokens), step):
                 self.model(mx.array(tokens[start:start + step])[None], cache=cache)
                 mx.eval([c.state for c in cache])
@@ -222,12 +224,15 @@ class TextRunner:
 
     def _drop_superseded(self, key):
         """Before a snapshot at `key` is stored, drop what it makes dead weight:
-        the conversation's earlier snapshots (strict prefixes of key) and the
+        the conversation's earlier entries (strict prefixes of key) and the
         replies stored after them that the conversation did not keep (they
-        extend a dropped prefix but not key). Untrimmable entries are never
-        dropped by the LRU itself, so without this each turn would be charged
-        again for the whole history before it. Uses LRUPromptCache's internals,
-        which both pinned mlx-lm versions share."""
+        extend one of those prefixes but not key). The previous snapshot stays:
+        a client that forks the history for a side request (a title, a
+        suggestion) must not leave the real next turn without a cache.
+        Untrimmable entries are never dropped by the LRU itself, so without
+        this each turn would be charged again for the whole history before
+        it. Uses LRUPromptCache's internals, which both pinned mlx-lm versions
+        share."""
         lru = self.prompt_cache
         stored = [(kind, tokens) for kind, queue in lru._lru._lrus.items()
                   for _, tokens in queue]
@@ -236,11 +241,13 @@ class TextRunner:
             return len(tokens) > len(prefix) and tokens[:len(prefix)] == prefix
 
         prefixes = [tokens for _, tokens in stored if extends(key, tokens)]
+        previous = max((tokens for kind, tokens in stored
+                        if kind == "user" and tokens in prefixes), key=len, default=None)
         stale = [tokens for kind, tokens in stored
                  if kind == "assistant" and tokens not in prefixes
                  and tokens[:len(key)] != key
                  and any(extends(tokens, prefix) for prefix in prefixes)]
-        for tokens in prefixes + stale:
+        for tokens in [t for t in prefixes if t != previous] + stale:
             entry = lru._trie.pop(self._cache_key, tokens)
             lru._n_bytes -= entry.nbytes
             lru._n_bytes_by_type[entry.cache_type] -= entry.nbytes

@@ -98,3 +98,15 @@ def test_status_failure_is_stderr_only(monkeypatch, capsys, json_output):
     assert exc.value.code == 1
     assert captured.out == ""
     assert "no mlxh server running" in captured.err
+
+
+def test_manager_status_shows_each_workers_prompt_cache(monkeypatch, capsys):
+    worker = {"model": "inkling2-mini", "model_kind": "language", "pid": 7, "state": "idle",
+              "queue_depth": 0, "requests": 3, "active_memory_bytes": 4_000_000_000,
+              "prompt_cache": {"entries": 3, "bytes": 420_000_000, "hits": 5}}
+    payload = {"manager": True, "workers": [worker, {**worker, "model": "bonsai2",
+                                                     "prompt_cache": None}]}
+    monkeypatch.setattr(cli, "_fetch_info", lambda _port: payload)
+    cli.cmd_status(NS(json=False))
+    out = capsys.readouterr().out
+    assert "PROMPT CACHE" in out and "3 seq 0.4 GB (5 hits)" in out
