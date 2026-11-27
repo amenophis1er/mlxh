@@ -448,9 +448,10 @@ class InferenceEngine(EngineLifecycle):
         thinking = request.thinking
         if thinking is None:
             thinking = {"on": True, "off": False}.get(self.settings["thinking"])
+        fmt = getattr(self.runner, "tool_format", QWEN_XML)
         prompt = self.runner.template(
-            messages, num_images=len(images), tools=request.tools, thinking=thinking,
-            effort=request.reasoning_effort,
+            fmt.prepare_history(messages), num_images=len(images), tools=request.tools,
+            thinking=thinking, effort=request.reasoning_effort,
         )
         own_parser = getattr(self.runner, "output_parser", None)
         reasoning_parser = own_parser() if own_parser else ReasoningParser(

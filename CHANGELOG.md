@@ -46,7 +46,10 @@
   JSON `<tool_call>{"name": …, "arguments": …}</tool_call>`, including the
   doubled brace and missing closing tag Qwen2.5 writes. Streamed text stops
   at each format's own marker, and values round-trip exactly (a quoted
-  `"3"` stays a string).
+  `"3"` stays a string). A call that cannot be read is returned as text
+  along with what follows it, so text quoted inside a call's arguments is
+  never run as a call. `mlxh chat --tools` now sends each tool result with
+  its call's id and name, which Gemma's template needs to label them.
 
 ## v0.2.2 — 2026-11-25
 

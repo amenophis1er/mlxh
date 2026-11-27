@@ -326,7 +326,8 @@ def ask(transport, messages, images, max_tokens, tools=None, thinking=None):
         messages.append({
             "role": "assistant", "content": content or "",
             "tool_calls": [
-                {"function": {"name": tc["function"]["name"],
+                {"id": tc["id"], "type": "function",
+                 "function": {"name": tc["function"]["name"],
                               "arguments": json.loads(tc["function"]["arguments"])}}
                 for tc in tool_calls
             ],
@@ -337,7 +338,8 @@ def ask(transport, messages, images, max_tokens, tools=None, thinking=None):
             result = run_tool(registry, name, args)
             print("\n" + ui.dim(f"[tool] {name}({json.dumps(args, ensure_ascii=False)}) -> "
                   f"{json.dumps(result, ensure_ascii=False)}", sys.stderr), file=sys.stderr)
-            messages.append({"role": "tool", "content": json.dumps(result)})
+            messages.append({"role": "tool", "tool_call_id": tc["id"], "name": name,
+                             "content": json.dumps(result)})
         images = []  # images only accompany the first pass
     print("\n(stopped: too many tool rounds)", file=sys.stderr)
     return ""

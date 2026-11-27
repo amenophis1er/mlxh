@@ -241,9 +241,10 @@ Throughput numbers from the machine this was built on are in
 ## Notes and limits
 
 - One generation at a time (a second concurrent API request waits, then 503s).
-- Tool-call parsing targets the Qwen-style `<tool_call>` XML format, which
-  covers Qwen-lineage models (Bonsai included). Other families fall back to
-  plain chat gracefully.
+- Tool calls are parsed in three formats, picked from the model's chat
+  template: Qwen-style `<tool_call>` XML (Qwen 3.5, Bonsai, Inkling 2),
+  Gemma 4's `<|tool_call>` and Hermes-style JSON (Qwen 2.5). Other families
+  are read as Qwen XML, so their calls come back as plain text.
 - Video input is not supported; images are.
 - The server binds to 127.0.0.1 by default and has no authentication — don't
   expose it beyond localhost as-is.

@@ -87,7 +87,13 @@ model's chat template when it loads (the worker log says which):
 
 Argument values come back as the model wrote them: a Gemma 4 or Hermes
 string that looks like a number stays a string. A call that does not parse
-is returned as text.
+is returned as text, and so is everything after it: text inside a broken
+call is never read as a call of its own. A family with none of these
+markers in its template is read as `qwen_xml`.
+
+Gemma 4's template has no place for text an assistant wrote before its tool
+call, so that text is left out when the conversation is sent back to the
+model.
 
 Streaming is standard SSE `chat.completion.chunk` events ending with
 `data: [DONE]`; the final chunk carries `usage`. When `tools` are present the

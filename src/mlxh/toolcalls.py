@@ -37,23 +37,64 @@ def _call(name, args):
     }
 
 
+def _no_constant(name):
+    raise ValueError(f"{name} is not JSON")  # NaN, Infinity: no client could read them back
+
+
+_JSON = json.JSONDecoder(parse_constant=_no_constant)
+
+
+def _skip_space(text, i):
+    while i < len(text) and text[i].isspace():
+        i += 1
+    return i
+
+
 class ToolFormat:
     """How one model family writes tool calls. parse returns (content, calls)."""
     name = ""
     marker = ""  # streamed text stops here: a call may be starting
 
     def parse(self, text):
-        text = THINK_RE.sub("", text, count=1)
         content, calls = self.split(text)
         return content.strip(), calls or None
 
     def split(self, text):
+        """Read each call from its marker on. A marker with no call after it
+        is prose and stays; a call that starts and cannot be read ends the
+        search, so nothing inside a broken call is ever taken for a call."""
+        kept, calls, at = [], [], 0
+        while (start := text.find(self.marker, at)) != -1:
+            try:
+                call, end = self.read(text, start + len(self.marker))
+            except (ValueError, IndexError, RecursionError):
+                break
+            if call is None:  # the marker was only mentioned
+                kept.append(text[at:end])
+            else:
+                kept.append(text[at:start])
+                calls.append(call)
+            at = end
+        kept.append(text[at:])
+        return "".join(kept), calls
+
+    def read(self, text, i):
+        """The call that starts at text[i], as (call, index after it); (None,
+        i) when no call starts there. Raises when one starts and is broken."""
         raise NotImplementedError
+
+    def prepare_history(self, messages):
+        """Messages as this family's chat template expects them."""
+        return messages
 
 
 class QwenXml(ToolFormat):
     """<tool_call><function=NAME><parameter=KEY>VALUE</parameter>…</function></tool_call>"""
     name, marker = "qwen_xml", "<tool_call>"
+
+    def parse(self, text):
+        # Raw output may still open with the template's think block.
+        return super().parse(THINK_RE.sub("", text, count=1))
 
     def split(self, text):
         calls = []
@@ -62,7 +103,7 @@ class QwenXml(ToolFormat):
             for key, value in PARAM_RE.findall(body):
                 try:
                     args[key] = json.loads(value)
-                except json.JSONDecodeError:
+                except (ValueError, RecursionError):
                     args[key] = value
             calls.append(_call(name, args))
         return TOOL_CALL_RE.sub("", text), calls
@@ -74,101 +115,118 @@ class HermesJson(ToolFormat):
     _end = "</tool_call>"
 
     @staticmethod
-    def _decode(body):
-        # Qwen2.5's template prints its example as {{"name": …}, and small
-        # models copy the extra brace: skip leading ones until JSON decodes.
-        body = body.lstrip()
-        while body.startswith("{"):
+    def _decode(text, i):
+        """(value, index after it, extra braces skipped). Qwen2.5's template
+        prints its example as {{"name": …}} and small models copy the brace."""
+        for extra in range(3):
             try:
-                value, _ = json.JSONDecoder().raw_decode(body)
-                return value
-            except json.JSONDecodeError:
-                body = body[1:].lstrip()
-        return None
+                return (*_JSON.raw_decode(text, i), extra)
+            except ValueError:
+                i = _skip_space(text, i + 1)
+                if not text.startswith("{", i):
+                    raise
+        raise ValueError("not a JSON object")
 
-    @classmethod
-    def _read(cls, body):
-        value = cls._decode(body)
-        if not isinstance(value, dict) or not isinstance(value.get("name"), str):
-            return None
+    def read(self, text, i):
+        i = _skip_space(text, i)
+        if not text.startswith("{", i):
+            return None, i
+        value, i, extra = self._decode(text, i)
         args = value.get("arguments", value.get("parameters", {}))
         if isinstance(args, str):  # some models send arguments JSON-encoded
-            args = cls._decode(args)
-        return _call(value["name"], args) if isinstance(args, dict) else None
-
-    def split(self, text):
-        kept, calls, at = [], [], 0
-        while (start := text.find(self.marker, at)) != -1:
-            body_at = start + len(self.marker)
-            end = text.find(self._end, body_at)
-            # a last call may stop at end of output without its closing tag
-            stop = len(text) if end == -1 else end + len(self._end)
-            call = self._read(text[body_at:len(text) if end == -1 else end])
-            kept.append(text[at:start] if call else text[at:stop])
-            if call:
-                calls.append(call)
-            at = stop
-        kept.append(text[at:])
-        return "".join(kept), calls
+            args = _JSON.decode(args)
+        if not isinstance(value.get("name"), str) or not isinstance(args, dict):
+            raise ValueError("not a tool call")
+        for _ in range(extra):  # the braces that closed the copied ones
+            after = _skip_space(text, i)
+            i = after + 1 if text.startswith("}", after) else i
+        after = _skip_space(text, i)  # the closing tag is often left out
+        return _call(value["name"], args), (
+            after + len(self._end) if text.startswith(self._end, after) else i)
 
 
 class Gemma4(ToolFormat):
     """<|tool_call>call:NAME{key:value,…}<tool_call|>, strings as <|"|>…<|"|>"""
     name, marker = "gemma4", "<|tool_call>"
-    # a call's body never runs into the next call, so one broken call can't swallow it
-    _CALL = re.compile(r"<\|tool_call>call:([\w.\-]+)(\{(?:(?!<\|tool_call>).)*?\})<tool_call\|>",
-                       re.S)
+    _end = "<tool_call|>"
     _QUOTE = '<|"|>'
-    _BARE = re.compile(r"[^,:{}\[\]]+")
+    _HEAD = re.compile(r"\s*call:([\w.\-]+)\s*\{")
+    _BARE = re.compile(r"[^,{}\[\]]+")
+    _KEY = re.compile(r"[^:,{}\[\]]+")
+
+    def read(self, text, i):
+        head = self._HEAD.match(text, i)
+        if not head:
+            return None, i
+        args, i = self._object(text, head.end() - 1)
+        i = _skip_space(text, i)
+        if not text.startswith(self._end, i):
+            raise ValueError("call not closed")
+        return _call(head.group(1), args), i + len(self._end)
+
+    def _string(self, text, i):
+        end = text.index(self._QUOTE, i + len(self._QUOTE))
+        return text[i + len(self._QUOTE):end], end + len(self._QUOTE)
 
     def _value(self, text, i):
+        i = _skip_space(text, i)
         if text.startswith(self._QUOTE, i):
-            end = text.index(self._QUOTE, i + len(self._QUOTE))
-            return text[i + len(self._QUOTE):end], end + len(self._QUOTE)
+            return self._string(text, i)
         if text[i] == "{":
             return self._object(text, i)
         if text[i] == "[":
-            items, i = [], i + 1
-            while text[i] != "]":
-                item, i = self._value(text, i)
-                items.append(item)
-                i = i + 1 if text[i] == "," else i
-            return items, i + 1
-        word = self._BARE.match(text, i).group()
+            return self._items(text, i + 1, "]", lambda j: self._value(text, j))
+        word = self._bare(self._BARE, text, i)
         try:
-            return json.loads(word.strip()), i + len(word)
-        except json.JSONDecodeError:
-            return word.strip(), i + len(word)  # an unquoted word: keep it as text
+            return _JSON.decode(word.strip()), i + len(word)
+        except ValueError:
+            # the template writes null as None; any other bare word is text
+            return (None if word.strip() == "None" else word.strip()), i + len(word)
+
+    def _bare(self, pattern, text, i):
+        found = pattern.match(text, i)
+        if not found or "<|" in found.group() or "|>" in found.group():
+            raise ValueError("not a bare word")  # a token of the format, out of place
+        return found.group()
+
+    def _pair(self, text, i):
+        if text.startswith(self._QUOTE, i):
+            key, i = self._string(text, i)
+        else:
+            word = self._bare(self._KEY, text, i)
+            key, i = word.strip().strip('"'), i + len(word)
+        i = _skip_space(text, i)
+        if not key or text[i] != ":":
+            raise ValueError("no key")
+        value, i = self._value(text, i + 1)
+        return (key, value), i
 
     def _object(self, text, i):
-        obj, i = {}, i + 1
-        while text[i] != "}":
-            colon = text.index(":", i)
-            key = text[i:colon].strip()
-            if key.startswith(self._QUOTE) and key.endswith(self._QUOTE):
-                key = key[len(self._QUOTE):-len(self._QUOTE)]
-            obj[key], i = self._value(text, colon + 1)
-            i = i + 1 if text[i] == "," else i
-        return obj, i + 1
+        pairs, i = self._items(text, i + 1, "}", lambda j: self._pair(text, j))
+        return dict(pairs), i
 
-    def _read(self, match):
-        try:
-            args, end = self._object(match.group(2), 0)
-        except (ValueError, IndexError, AttributeError):
-            return None
-        return _call(match.group(1), args) if end == len(match.group(2)) else None
+    @staticmethod
+    def _items(text, i, close, read):
+        """Comma-separated items up to `close`; anything else between them is an error."""
+        items = []
+        while True:
+            i = _skip_space(text, i)
+            if text[i] == close:
+                return items, i + 1
+            item, i = read(i)
+            items.append(item)
+            i = _skip_space(text, i)
+            if text[i] == ",":
+                i += 1
+            elif text[i] != close:
+                raise ValueError("no separator")
 
-    def split(self, text):
-        calls = []
-
-        def take(match):
-            call = self._read(match)
-            if call is None:
-                return match.group(0)
-            calls.append(call)
-            return ""
-
-        return self._CALL.sub(take, text), calls
+    def prepare_history(self, messages):
+        # Gemma's template writes an assistant message's text after its tool
+        # responses and closes the turn there, leaving nothing open for the
+        # model to answer in. Text that came before a call is dropped instead.
+        return [{**m, "content": ""} if m.get("role") == "assistant" and m.get("tool_calls")
+                else m for m in messages]
 
 
 QWEN_XML, HERMES, GEMMA4 = QwenXml(), HermesJson(), Gemma4()
@@ -188,9 +246,13 @@ def format_for_template(template):
 
 
 def chat_template_text(model_dir):
-    """Every chat template a model directory carries, as one string."""
+    """The chat template a model directory uses, from the first place that
+    has one (the order transformers reads them in), so a stale copy in
+    tokenizer_config.json cannot outvote chat_template.jinja."""
     model_dir = Path(model_dir)
-    parts = [p.read_text(errors="replace") for p in sorted(model_dir.glob("chat_template*.jinja"))]
+    jinja = sorted(model_dir.glob("chat_template*.jinja"))
+    if jinja:
+        return "\n".join(p.read_text(errors="replace") for p in jinja)
     for name in ("chat_template.json", "tokenizer_config.json"):
         try:
             value = json.loads((model_dir / name).read_text()).get("chat_template")
@@ -198,9 +260,9 @@ def chat_template_text(model_dir):
             continue
         if isinstance(value, list):  # named templates: [{"name":…, "template":…}]
             value = " ".join(t.get("template", "") for t in value if isinstance(t, dict))
-        if isinstance(value, str):
-            parts.append(value)
-    return "\n".join(parts)
+        if isinstance(value, str) and value:
+            return value
+    return ""
 
 
 def detect_format(model_dir):
