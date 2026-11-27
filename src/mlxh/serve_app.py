@@ -31,7 +31,7 @@ from .engine import (
     capture_float32_logprobs as _capture_float32_logprobs,
     compute_logprobs as _compute_logprobs,
 )
-from .toolcalls import parse_tool_calls
+from .toolcalls import QWEN_XML
 from .images import (
     BODY_LIMIT as IMAGE_BODY_LIMIT, EDIT_BODY_LIMIT, MAX_REFERENCE_IMAGES,
     MAX_REFERENCE_IMAGE_BYTES, ImageEditRequest, ImageError,
@@ -366,7 +366,9 @@ def _should_shape_logprobs(resp, previous_tokens):
             and resp.finish_reason != "stop")
 
 
-MARKER = "<tool_call>"
+def _tool_format():
+    """How the loaded model writes tool calls (picked when it loaded)."""
+    return getattr(getattr(engine, "runner", None), "tool_format", None) or QWEN_XML
 
 
 def _phases(item):
@@ -408,13 +410,13 @@ def _new_text(visible, printed, started):
     return delta if started or delta.strip() else ""
 
 
-def _unsent(full, printed, text, tool_calls):
+def _unsent(full, printed, text, tool_calls, marker):
     """Answer text a stream still owes at its end, given the parsed `text`:
     all of the output when no call parsed, else what precedes the first call
     and whatever the model wrote after the calls."""
     if not tool_calls:
         return full[printed:]
-    before = _before_marker(full, True)
+    before = _before_marker(full, marker, True)
     head = before.strip()
     if not head:  # nothing but whitespace before the call, so none of it was sent
         return text
@@ -422,15 +424,16 @@ def _unsent(full, printed, text, tool_calls):
     return before[printed:] + after
 
 
-def _before_marker(full, final=False):
-    """Text safe to stream: up to a tool call, holding back a tail that could
-    still turn out to be the start of one."""
-    cut = full.find(MARKER)
+def _before_marker(full, marker, final=False):
+    """Text safe to stream: up to a tool call (the model's format has its own
+    marker), holding back a tail that could still turn out to be the start
+    of one."""
+    cut = full.find(marker)
     if cut != -1:
         return full[:cut]
     if not final:
-        for size in range(min(len(full), len(MARKER) - 1), 0, -1):
-            if MARKER.startswith(full[-size:]):
+        for size in range(min(len(full), len(marker) - 1), 0, -1):
+            if marker.startswith(full[-size:]):
                 return full[:-size]
     return full
 
@@ -467,6 +470,7 @@ def anthropic_messages(body: dict):
         with dump.open("a") as f:
             f.write(json.dumps({"anthropic": body, "openai": oai}) + "\n")
     chunks = submit(oai, "anthropic")
+    fmt = _tool_format()
     msg_id = f"msg_{uuid.uuid4().hex[:24]}"
 
     if body.get("stream"):
@@ -537,13 +541,13 @@ def anthropic_messages(body: dict):
                             yield from delta("thinking", text)
                         continue
                     parts.append(text)
-                    new = _new_text(_before_marker("".join(parts)), printed, text_started)
+                    new = _new_text(_before_marker("".join(parts), fmt.marker), printed, text_started)
                     if new:
                         yield from delta("text", new)
                         printed, text_started = printed + len(new), True
             full = "".join(parts)
-            text, tool_calls = parse_tool_calls(full)
-            rest = _new_text(_unsent(full, printed, text, tool_calls), 0, text_started)
+            text, tool_calls = fmt.parse(full)
+            rest = _new_text(_unsent(full, printed, text, tool_calls, fmt.marker), 0, text_started)
             if rest:
                 yield from delta("text", rest)
             yield from close_block()
@@ -588,7 +592,7 @@ def anthropic_messages(body: dict):
         parts.append(item.text)
         thought.append(item)
         last = item
-    text, tool_calls = parse_tool_calls("".join(parts))
+    text, tool_calls = fmt.parse("".join(parts))
     prompt_tokens, output_tokens = _usage_counts(last, terminal)
     return anth.message_response(
         MODEL_ID, text, tool_calls,
@@ -602,6 +606,7 @@ def openai_responses(body: dict):
     """OpenAI Responses API (what modern Codex speaks)."""
     oai = oresp.to_openai_body(body)
     chunks = submit(oai, "responses")
+    fmt = _tool_format()
     resp_id = f"resp_{uuid.uuid4().hex[:24]}"
 
     if body.get("stream"):
@@ -667,7 +672,7 @@ def openai_responses(body: dict):
                                          at="reasoning", delta=delta)
                         continue
                     parts.append(delta)
-                    yield from stream_text(_before_marker("".join(parts)))
+                    yield from stream_text(_before_marker("".join(parts), fmt.marker))
             if err is not None:
                 yield ev("response.failed", {
                     "type": "response.failed",
@@ -676,9 +681,9 @@ def openai_responses(body: dict):
                                  "error": {"code": "server_error", "message": str(err)}}})
                 return
             full = "".join(parts)
-            text, tool_calls = parse_tool_calls(full)
+            text, tool_calls = fmt.parse(full)
             reasoning = thought.text
-            yield from stream_text(full[:printed] + _unsent(full, printed, text, tool_calls))
+            yield from stream_text(full[:printed] + _unsent(full, printed, text, tool_calls, fmt.marker))
             if "reasoning" in ids:
                 yield item_event("response.reasoning_text.done", of="reasoning",
                                  at="reasoning", text=reasoning)
@@ -728,7 +733,7 @@ def openai_responses(body: dict):
         parts.append(item.text)
         thought.append(item)
         last = item
-    text, tool_calls = parse_tool_calls("".join(parts))
+    text, tool_calls = fmt.parse("".join(parts))
     prompt_tokens, output_tokens = _usage_counts(last, terminal)
     usage = oresp.usage_of(prompt_tokens, output_tokens, _cached_count(last, terminal))
     timed_out = terminal and terminal.outcome == "timed_out"
@@ -778,6 +783,7 @@ async def private_generate(body: dict, request: Request):
         job = engine.submit(_request(body, "chat"))
     except EngineError as exc:
         raise HTTPException(exc.status_code, exc.detail) from None
+    fmt = _tool_format()
 
     async def sse():
         terminal = None
@@ -815,14 +821,14 @@ async def private_generate(body: dict, request: Request):
                         yield _private_event("reasoning_delta", {"text": delta})
                         continue
                     parts.append(delta)
-                    visible = _before_marker("".join(parts))
+                    visible = _before_marker("".join(parts), fmt.marker)
                     if len(visible) > printed:
                         yield _private_event("text_delta", {"text": visible[printed:]})
                         printed = len(visible)
 
             full = "".join(parts)
-            content, tool_calls = parse_tool_calls(full)
-            rest = _unsent(full, printed, content, tool_calls)
+            content, tool_calls = fmt.parse(full)
+            rest = _unsent(full, printed, content, tool_calls, fmt.marker)
             if rest:
                 yield _private_event("text_delta", {"text": rest})
             if tool_calls:
@@ -886,6 +892,7 @@ def chat_completions(body: dict):
         }
 
     chunks = submit(body)
+    fmt = _tool_format()
 
     if body.get("stream"):
         def chunk_of(delta, finish=None, usage=None):
@@ -932,7 +939,7 @@ def chat_completions(body: dict):
                     else:
                         yield chunk_of({"content": delta})
             if has_tools:
-                content, tool_calls = parse_tool_calls("".join(parts))
+                content, tool_calls = fmt.parse("".join(parts))
                 if content:
                     yield chunk_of({"content": content})
                 if tool_calls:
@@ -973,7 +980,7 @@ def chat_completions(body: dict):
                 item.token, token_lp, top_ids, top_lps,
                 engine.runner.decode_token, body["_logprobs"]["as_ids"],
             ))
-    content, tool_calls = parse_tool_calls("".join(parts))
+    content, tool_calls = fmt.parse("".join(parts))
     message = {"role": "assistant", "content": content or None}
     if _reasoning_of(thought):
         message["reasoning_content"] = _reasoning_of(thought)

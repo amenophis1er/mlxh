@@ -40,6 +40,13 @@
   parse and any text after a tool call are now sent as text, as the
   non-streaming responses have them. `mlxh chat` no longer drops characters
   from an answer that starts with whitespace.
+- **Tool calls for Gemma 4 and Hermes-style models**: the tool-call parser is
+  now chosen per model from its chat template at load: Qwen XML (the default,
+  unchanged), Gemma 4's `<|tool_call>call:NAME{…}<tool_call|>`, and Hermes
+  JSON `<tool_call>{"name": …, "arguments": …}</tool_call>`, including the
+  doubled brace and missing closing tag Qwen2.5 writes. Streamed text stops
+  at each format's own marker, and values round-trip exactly (a quoted
+  `"3"` stays a string).
 
 ## v0.2.2 — 2026-11-25
 

@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from .images import ImageEditRequest, ImageGenerationRequest
 
 from .loader import load_runner
+from .toolcalls import QWEN_XML
 
 MAX_DECODED_IMAGE = 25 * 1024 * 1024
 
@@ -262,7 +263,8 @@ class InferenceEngine(EngineLifecycle):
             except Exception as exc:
                 print(f"[mlx] stats error: {exc}", flush=True)
             print(f"Ready in {time.perf_counter() - started:.1f}s "
-                  f"(images: {'yes' if self.runner.supports_images else 'no'})",
+                  f"(images: {'yes' if self.runner.supports_images else 'no'}, "
+                  f"tool calls: {getattr(self.runner, 'tool_format', QWEN_XML).name})",
                   flush=True)
             self.ready.set()
         except BaseException as exc:

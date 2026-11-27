@@ -76,10 +76,24 @@ back `tool_calls` with `finish_reason: "tool_calls"`; return results as
 `role: "tool"` messages. The server never executes tools. `tool_choice` is
 not enforced (the model decides).
 
+Each model family writes calls its own way; mlxh picks the parser from the
+model's chat template when it loads (the worker log says which):
+
+| Format | Written as | Models |
+|---|---|---|
+| `qwen_xml` (default) | `<tool_call><function=NAME><parameter=KEY>…</parameter></function></tool_call>` | Qwen3.5, Bonsai, Inkling 2 |
+| `gemma4` | `<\|tool_call>call:NAME{key:<\|"\|>text<\|"\|>,n:3}<tool_call\|>` | Gemma 4 |
+| `hermes` | `<tool_call>{"name": NAME, "arguments": {…}}</tool_call>` | Qwen2.5, Hermes |
+
+Argument values come back as the model wrote them: a Gemma 4 or Hermes
+string that looks like a number stays a string. A call that does not parse
+is returned as text.
+
 Streaming is standard SSE `chat.completion.chunk` events ending with
 `data: [DONE]`; the final chunk carries `usage`. When `tools` are present the
-answer is buffered and delivered once parseable (tool-call XML must be read
-whole); reasoning still streams as it is generated. Comment lines (`: ping`) are emitted every 15s while the model is
+answer is buffered and delivered once parseable (a tool call must be read
+whole); reasoning still streams as it is generated. Comment lines (`: ping`)
+are emitted every 15s while the model is
 still processing the prompt — SSE-legal, ignored by clients.
 
 ```bash

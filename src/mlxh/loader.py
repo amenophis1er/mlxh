@@ -14,6 +14,8 @@ import time
 import warnings
 from pathlib import Path
 
+from .toolcalls import QWEN_XML, detect_format
+
 # Must be set before transformers is first imported: silences import-time
 # advisories (e.g. "PyTorch was not found") the user can't act on.
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
@@ -25,6 +27,7 @@ warnings.filterwarnings("ignore", message=".*mel filter.*", category=UserWarning
 
 class VLMRunner:
     supports_images = True
+    tool_format = QWEN_XML
     supports_cache = True
 
     def __init__(self, model, processor, config):
@@ -74,6 +77,7 @@ class VLMRunner:
 
 class TextRunner:
     supports_images = False
+    tool_format = QWEN_XML
     supports_cache = True
 
     def __init__(self, model, tokenizer):
@@ -295,8 +299,14 @@ def _quiet_libraries():
 
 
 def load_runner(model_dir):
+    runner = _load_runner(Path(model_dir))
+    if not isinstance(runner, InklingRunner):  # its parser already writes Qwen XML
+        runner.tool_format = detect_format(model_dir)
+    return runner
+
+
+def _load_runner(model_dir):
     _quiet_libraries()
-    model_dir = Path(model_dir)
     cfg_path = model_dir / "config.json"
     cfg = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
     model_type = cfg.get("model_type", "")
