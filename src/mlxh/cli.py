@@ -962,7 +962,8 @@ def pi_register_provider(port, model, path=None, supports_images=False):
         "baseUrl": f"http://127.0.0.1:{port}/v1",
         "api": "openai-completions",
         "apiKey": "mlxh",
-        # plain OpenAI-compatible server: no developer role / reasoning_effort
+        # no developer role; reasoning_effort stays off here so the server's
+        # thinking setting decides, not pi's own default level
         "compat": {"supportsDeveloperRole": False,
                    "supportsReasoningEffort": False},
     })

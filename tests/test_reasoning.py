@@ -19,9 +19,20 @@ def test_every_openai_level_is_accepted(value):
     assert request.thinking is (value != "none")
 
 
-def test_unknown_effort_is_rejected():
+@pytest.mark.parametrize("value", ["extreme", "auto", "on", "High", "", 0.5, 3, True, ["low"]])
+def test_unknown_effort_is_rejected(value):
     with pytest.raises(reasoning.ReasoningError, match="reasoning_effort must be one of"):
-        serve_app._request({"messages": HI, "reasoning_effort": "extreme"})
+        serve_app._request({"messages": HI, "reasoning_effort": value})
+
+
+def test_the_level_list_is_exactly_what_the_api_documents():
+    assert reasoning.LEVELS == ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+
+
+@pytest.mark.parametrize("runner", [loader.VLMRunner, loader.TextRunner, loader.InklingRunner])
+def test_every_runner_template_takes_the_effort(runner):
+    import inspect
+    assert "effort" in inspect.signature(runner.template).parameters
 
 
 def test_no_effort_leaves_enable_thinking_in_charge():
@@ -42,6 +53,8 @@ def test_effort_wins_over_enable_thinking():
     ("/v1/responses", {"input": "hi", "reasoning": {"effort": "turbo"}}),
     ("/v1/responses", {"input": "hi", "reasoning": "high"}),
     ("/v1/messages", {"messages": HI, "max_tokens": 9, "thinking": {"type": "on"}}),
+    ("/v1/messages", {"messages": HI, "max_tokens": 9, "thinking": "enabled"}),
+    ("/v1/messages", {"messages": HI, "max_tokens": 9, "thinking": {}}),
     ("/v1/messages", {"messages": HI, "max_tokens": 9, "thinking": {"type": "enabled"}}),
 ])
 def test_bad_reasoning_values_are_a_400(monkeypatch, route, body):

@@ -169,10 +169,16 @@ else is a **400**. Anthropic `thinking` maps onto the same levels:
 | same, N ≥ 16384 | `high` |
 | `{"type": "adaptive"}` or absent | the server's `thinking` setting |
 
+Also a **400**: `reasoning` or `thinking` that is not an object, a
+`thinking.type` other than the three above, and `enabled` without a positive
+integer `budget_tokens`.
+
 Inkling 2 receives the level as its template's `reasoning_effort`. Other
 models only switch reasoning: `none` turns it off, any other level on. A
 level in the request wins over `chat_template_kwargs.enable_thinking` and
-over the server's `thinking` setting.
+over the server's `thinking` setting. That includes agent clients that send
+the field on their own: Claude Code's `thinking` block and Codex's
+`reasoning.effort` now decide, where the server's setting used to.
 
 ## Anthropic dialect
 

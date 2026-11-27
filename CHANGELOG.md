@@ -23,7 +23,10 @@
   4096 is `low`, under 16384 `medium`, else `high`). Inkling 2 gets the level
   in its template; other models switch thinking off for `none` and on
   otherwise. The request wins over `enable_thinking` and the `thinking`
-  setting; unknown values are a 400.
+  setting; unknown values are a 400. Behaviour change: agent clients that
+  send these fields unasked (Claude Code's `thinking`, Codex's
+  `reasoning.effort`) now override `thinking off`/`on` on the server, where
+  the fields were ignored before.
 
 ## v0.2.2 — 2026-11-25
 
