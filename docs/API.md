@@ -37,7 +37,9 @@ Server-side limits (see README "Server controls"):
   `max_prompt_tokens` replaces it for every model (N), or removes it (-1).
   `GET /mlxh/info` reports the limit in force as `prompt_cap`.
 - A generation exceeding `gen_timeout_s` (default 600) is stopped and
-  returned as-is.
+  returned as-is. A prompt still being processed at that point has produced
+  nothing: it is stopped at its next chunk (2048 tokens) and the request
+  fails with **504**.
 - MLX memory is capped (default 80% of RAM); allocations beyond it fail the
   request with **500**, not the machine.
 

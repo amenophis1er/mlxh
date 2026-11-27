@@ -134,8 +134,9 @@ from its context length and from what one token costs in its cache against
 the memory left under `memory_limit_gb`; `mlxh status` shows it. The
 estimate is per worker: several resident models share the same RAM. A long
 prompt also takes time (Inkling 2 Mini: 37 s for 32k tokens, over 6 minutes
-for 128k on an M-series 64 GB machine), and `gen_timeout_s` only stops a
-generation between tokens, so raise it for prompts that long.
+for 128k on an M-series 64 GB machine). A prompt still being processed when
+`gen_timeout_s` passes is stopped at its next chunk with a 504, so raise
+the timeout for prompts that long.
 
 Each model worker retains its existing serial queue. Different model workers
 are independent processes and may infer concurrently; they share Apple Silicon

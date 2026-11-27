@@ -14,8 +14,12 @@
   were meant: a stored 8192 (the old default, which every saved file
   carries) becomes per model, a stored 0 (the old "off") becomes -1, and any
   other value stays the limit for every model. `--max-prompt-tokens 0` on
-  the command line now means per model, not off. A long prompt also takes
-  time, and `gen_timeout_s` only stops a generation between tokens.
+  the command line now means per model, not off.
+- **`gen_timeout_s` now covers prompt processing**: a prompt still being
+  processed when the timeout passes is stopped at its next 2048-token chunk
+  and the request fails with a 504 that says how far it got. Before, the
+  whole prompt was processed, however long it took, and the request was cut
+  after its first token.
 
 ## v0.2.3 — 2026-11-27
 

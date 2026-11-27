@@ -261,7 +261,7 @@ def test_non_trimmable_failed_or_unsound_requests_store_no_snapshot(linear, monk
 def test_non_trimmable_failed_prefill_keeps_earlier_entries(linear, monkeypatch):
     run(linear, [1, 2, 3, 4])
 
-    def failing(self, cache, tokens, step=2048):
+    def failing(self, cache, tokens, step=2048, deadline=None):
         raise RuntimeError("metal oom")
 
     monkeypatch.setattr(TextRunner, "_prefill_snapshot", failing)
@@ -446,3 +446,70 @@ def test_prompt_cost_reads_growth_off_the_models_real_cache():
     runner.enable_cache(max_bytes=5 * 10**9)
     cost = runner.prompt_cost()
     assert (cost["copies"], cost["reserve"], cost["per_token"]) == (2, 5 * 10**9, 2 * 256)
+
+
+# --- a prompt still being processed at the deadline -----------------------
+
+from mlxh.loader import PromptTimeout
+
+LATE = 0.0          # a deadline already behind us
+NEVER = float("inf")
+
+
+def reporting_stream_generate(model, tokenizer, prompt, max_tokens=1, **kwargs):
+    """mlx-lm's prompt loop: it reports in before and after each chunk."""
+    report = kwargs.get("prompt_progress_callback") or (lambda *_: None)
+    reporting_stream_generate.reports = []
+    for done in range(0, len(prompt) + 1, 2):
+        reporting_stream_generate.reports.append(done)
+        report(done, len(prompt))
+    yield from fake_stream_generate(model, tokenizer, prompt, max_tokens, **kwargs)
+
+
+def test_trimmable_prompt_past_its_deadline_stops_at_the_next_chunk(runner, monkeypatch):
+    run(runner, [1, 2, 3, 4])
+    before = stored_keys(runner)
+    monkeypatch.setattr(mlx_lm, "stream_generate", reporting_stream_generate)
+    with pytest.raises(PromptTimeout) as err:
+        list(runner.stream([9, 8, 7, 6, 5, 4], max_tokens=2, deadline=LATE))
+    assert (err.value.processed, err.value.total) == (0, 6)
+    assert reporting_stream_generate.reports == [0], "no further chunk was processed"
+    assert stored_keys(runner) == before
+
+
+def test_a_prompt_in_time_or_already_through_is_not_stopped(runner, monkeypatch):
+    monkeypatch.setattr(mlx_lm, "stream_generate", reporting_stream_generate)
+    assert len(list(runner.stream([1, 2, 3, 4], max_tokens=2, deadline=NEVER))) == 2
+    TextRunner._still_in_time(LATE, 6, 6)  # every token processed: let it answer
+    with pytest.raises(PromptTimeout):
+        TextRunner._still_in_time(LATE, 4, 6)
+
+
+def test_without_a_deadline_mlx_lm_gets_no_callback(runner, monkeypatch):
+    seen = {}
+
+    def spying(model, tokenizer, prompt, max_tokens=1, **kwargs):
+        seen.update(kwargs)
+        yield from fake_stream_generate(model, tokenizer, prompt, max_tokens, **kwargs)
+
+    monkeypatch.setattr(mlx_lm, "stream_generate", spying)
+    run(runner, [1, 2, 3])
+    assert "prompt_progress_callback" not in seen
+
+
+def test_snapshot_prefill_past_its_deadline_stops_between_chunks(linear, monkeypatch):
+    run(linear, [1, 2, 3, 4])
+    before = stored_keys(linear)
+    late_after = iter([False, False, True])  # two chunks in time, then late
+    monkeypatch.setattr(loader, "_past", lambda deadline: next(late_after))
+    cache = cache_mod.make_prompt_cache(linear.model)
+    linear.model.calls.clear()
+    with pytest.raises(PromptTimeout) as err:
+        linear._prefill_snapshot(cache, [5, 6, 7, 8, 9, 10], step=2, deadline=123.0)
+    assert linear.model.calls == [[5, 6], [7, 8]]
+    assert (err.value.processed, err.value.total) == (4, 6)
+
+    monkeypatch.setattr(loader, "_past", lambda deadline: deadline is not None)
+    with pytest.raises(PromptTimeout):
+        list(linear.stream([1, 2, 3, 4, 50, 51, 5, 6], max_tokens=2, deadline=123.0))
+    assert stored_keys(linear) == before, "a prompt that timed out stores nothing"

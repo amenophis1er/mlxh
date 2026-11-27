@@ -7,6 +7,7 @@ Two families are supported behind one Runner interface:
 """
 
 import copy
+import functools
 import json
 import os
 import sys
@@ -24,6 +25,36 @@ os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 # Gemma-style audio towers trip a harmless mel-filter warning while their
 # (unused) audio preprocessor initializes; keep startup clean.
 warnings.filterwarnings("ignore", message=".*mel filter.*", category=UserWarning)
+
+
+class PromptTimeout(Exception):
+    """Prompt processing ran past the request's deadline; nothing was generated."""
+
+    def __init__(self, processed=None, total=None):
+        super().__init__("prompt processing timed out")
+        self.processed, self.total = processed, total
+
+
+def _past(deadline):
+    return deadline is not None and time.perf_counter() > deadline
+
+
+def _watch_calls(module, check):
+    """Run `check` before every call of `module`. mlx-vlm processes a prompt
+    in chunks, one call of the language model each, and offers no hook
+    between them: this is the one place a deadline can be noticed there."""
+    base = type(module)
+
+    class Watched(base):
+        @functools.wraps(base.__call__)
+        def __call__(self, *args, **kwargs):
+            check()
+            return base.__call__(self, *args, **kwargs)
+
+    # mlx-vlm finds a model's helpers through its class's module and name
+    Watched.__name__, Watched.__qualname__, Watched.__module__ = (
+        base.__name__, base.__qualname__, base.__module__)
+    module.__class__ = Watched
 
 
 def _probe_cache(language_model, make_prompt_cache):
@@ -44,6 +75,17 @@ class VLMRunner:
     def __init__(self, model, processor, config):
         self.model, self.processor, self.config = model, processor, config
         self.apc = None
+        self._deadline = None  # set while a request's prompt is being processed
+        language_model = getattr(model, "language_model", None)
+        if language_model is not None:
+            try:
+                _watch_calls(language_model, self._check_deadline)
+            except TypeError:  # a class that cannot be extended: no early stop
+                pass
+
+    def _check_deadline(self):
+        if _past(self._deadline):
+            raise PromptTimeout()
 
     def enable_cache(self, max_bytes=None, num_blocks=4096, block_size=16):
         """Automatic prefix caching: reuse KV blocks across requests.
@@ -77,7 +119,7 @@ class VLMRunner:
         )
 
     def stream(self, prompt, images=None, max_tokens=1024, temperature=None,
-               top_p=None, logits_processors=None):
+               top_p=None, logits_processors=None, deadline=None):
         from mlx_vlm import stream_generate
         kwargs = {}
         if temperature is not None:
@@ -88,10 +130,18 @@ class VLMRunner:
             kwargs["logits_processors"] = logits_processors
         if self.apc is not None:
             kwargs["apc_manager"] = self.apc
-        yield from stream_generate(
-            self.model, self.processor, prompt,
-            image=images or None, max_tokens=max_tokens, **kwargs,
-        )
+        # The deadline only guards prompt processing: once a token is out,
+        # the engine stops a late generation between tokens and keeps the text.
+        self._deadline = deadline
+        try:
+            for response in stream_generate(
+                self.model, self.processor, prompt,
+                image=images or None, max_tokens=max_tokens, **kwargs,
+            ):
+                self._deadline = None
+                yield response
+        finally:
+            self._deadline = None
 
     def decode_token(self, token_id: int) -> str:
         return self.processor.tokenizer.decode([token_id])
@@ -175,7 +225,7 @@ class TextRunner:
         )
 
     def stream(self, prompt, images=None, max_tokens=1024, temperature=None,
-               top_p=None, logits_processors=None):
+               top_p=None, logits_processors=None, deadline=None):
         from mlx_lm import stream_generate
         from mlx_lm.sample_utils import make_sampler
         kwargs = {}
@@ -186,6 +236,8 @@ class TextRunner:
             )
         if logits_processors:
             kwargs["logits_processors"] = logits_processors
+        if deadline is not None:
+            kwargs["prompt_progress_callback"] = functools.partial(self._still_in_time, deadline)
 
         cache, key, cached = None, None, 0
         if self.prompt_cache is not None and not isinstance(prompt, str):
@@ -204,7 +256,7 @@ class TextRunner:
         try:
             if key is not None and self._wants_snapshot(cache, prompt, key):
                 started = time.perf_counter()
-                snapshot = (key[:-1], self._prefill_snapshot(cache, prompt[:-1]))
+                snapshot = (key[:-1], self._prefill_snapshot(cache, prompt[:-1], deadline=deadline))
                 prefill_s = time.perf_counter() - started
                 prompt = prompt[-1:]
             for response in stream_generate(
@@ -245,7 +297,14 @@ class TextRunner:
         from mlx_lm.models.cache import can_trim_prompt_cache
         return len(prompt) > 1 and len(key) > 2 and not can_trim_prompt_cache(cache)
 
-    def _prefill_snapshot(self, cache, tokens, step=2048):
+    @staticmethod
+    def _still_in_time(deadline, processed, total):
+        """mlx-lm reports in after each chunk of the prompt; a prompt that is
+        through is left to produce its first token."""
+        if processed < total and _past(deadline):
+            raise PromptTimeout(processed, total)
+
+    def _prefill_snapshot(self, cache, tokens, step=2048, deadline=None):
         """Process all but the last prompt token, as mlx_lm's generate_step
         does (same chunks, same stream, same wired limit: a miss computes
         exactly what it would uncached), and return a copy of the cache at
@@ -254,6 +313,7 @@ class TextRunner:
         from mlx_lm.generate import generation_stream, wired_limit
         with wired_limit(self.model, [generation_stream]), mx.stream(generation_stream):
             for start in range(0, len(tokens), step):
+                self._still_in_time(deadline, start, len(tokens))
                 self.model(mx.array(tokens[start:start + step])[None], cache=cache)
                 mx.eval([c.state for c in cache])
                 mx.clear_cache()

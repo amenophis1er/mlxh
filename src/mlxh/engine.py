@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from .images import ImageEditRequest, ImageGenerationRequest
 
 from . import prompt_cap
-from .loader import load_runner
+from .loader import PromptTimeout, load_runner
 from .toolcalls import QWEN_XML
 
 MAX_DECODED_IMAGE = 25 * 1024 * 1024
@@ -302,8 +302,10 @@ class InferenceEngine(EngineLifecycle):
                     "started_monotonic": time.monotonic(),
                 }
             stream = None
+            timeout = self.settings["gen_timeout_s"]
             try:
-                stream = self._run_generation(job.request)
+                stream = self._run_generation(
+                    job.request, deadline=started + timeout if timeout else None)
                 for response in stream:
                     last = response
                     job.out.put(response)
@@ -317,6 +319,10 @@ class InferenceEngine(EngineLifecycle):
                         break
                 else:
                     finish_reason = (getattr(last, "finish_reason", None) or "stop")
+            except PromptTimeout as exc:
+                outcome, finish_reason = "timed_out", "timeout"
+                print(f"[gen] timeout after {timeout}s, still processing the prompt", flush=True)
+                job.out.put(self._prompt_timeout_error(exc, timeout))
             except BaseException as exc:
                 outcome, finish_reason = "failed", "error"
                 job.out.put(exc)
@@ -366,6 +372,16 @@ class InferenceEngine(EngineLifecycle):
             return int(self.memory_limit_bytes * 0.25)
         ram = total_ram_bytes()
         return int(ram * 0.2) if ram else 8 * 10**9
+
+    @staticmethod
+    def _prompt_timeout_error(exc, timeout):
+        done = (f" after {exc.processed:,} of {exc.total:,} tokens"
+                if exc.total else "")
+        return EngineError(
+            504, f"the prompt was still being processed when gen_timeout_s={timeout}s "
+                 f"passed{done}; nothing was generated. Shorten the prompt, or allow "
+                 "more time: `mlxh config gen_timeout_s N` (0 = no limit), then restart "
+                 "the server.")
 
     def _resolve_prompt_cap(self, mx):
         """This model's prompt limit (see prompt_cap). Measuring what a token
@@ -462,7 +478,7 @@ class InferenceEngine(EngineLifecycle):
             raise
         return messages, images, tmp_files
 
-    def _run_generation(self, request: GenerationRequest):
+    def _run_generation(self, request: GenerationRequest, deadline=None):
         messages, images, tmp_files = self._extract_messages(request.messages)
         max_tokens = request.max_tokens
         if self.settings["max_tokens_cap"]:
@@ -507,7 +523,7 @@ class InferenceEngine(EngineLifecycle):
             for response in self.runner.stream(
                 prompt, images=images, max_tokens=max_tokens,
                 temperature=request.temperature, top_p=request.top_p,
-                logits_processors=processors,
+                logits_processors=processors, deadline=deadline,
             ):
                 last = response
                 answer_text, reasoning_text = reasoning_parser.feed(
